@@ -1,23 +1,11 @@
-try:
-    import dbus
-    import dbus.mainloop.glib
-except ImportError:
-    import sys
-    print("Module 'dbus' not found")
-    print("Please run: sudo apt-get install python3-dbus")
-    print("See also: https://github.com/getsenic/gatt-python#installing-gatt-sdk-for-python")
-    sys.exit(1)
-
 import re
-
-from gi.repository import GObject
-
+import sys
+import paho.mqtt.client as mqtt
+import ssl
 from . import errors
 
-
-dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-dbus.mainloop.glib.threads_init()
-
+## Need Homebrew & apt and install with the correct python version, 面倒くさい！
+from gi.repository import GObject
 
 class DeviceManager:
     """
@@ -26,35 +14,39 @@ class DeviceManager:
     This class is intended to be subclassed to manage a specific set of GATT devices.
     """
 
-    def __init__(self, adapter_name):
+    def __init__(self, mqtt_host, mqtt_port, mqtt_user, mqtt_password):
         self.listener = None
-        self.adapter_name = adapter_name
+        self.adapter_name = 'mqtt'
+        self._adapter = None
+        self._adapter_properties = False
 
-        self._bus = dbus.SystemBus()
+        # Initialise MQTT adaptor
+        mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        mqttc.on_connect = self._on_connect
+        mqttc.on_message = self._on_message
+        mqttc.tls_set("mqtt.telldus.com.crt", tls_version=ssl.PROTOCOL_TLSv1_2)
+        mqttc.tls_insecure_set(True)
         try:
-            adapter_object = self._bus.get_object('org.bluez', '/org/bluez/' + adapter_name)
-        except dbus.exceptions.DBusException as e:
-            raise _error_from_dbus_error(e)
-        object_manager_object = self._bus.get_object("org.bluez", "/")
-        self._adapter = dbus.Interface(adapter_object, 'org.bluez.Adapter1')
-        self._adapter_properties = dbus.Interface(self._adapter, 'org.freedesktop.DBus.Properties')
-        self._object_manager = dbus.Interface(object_manager_object, "org.freedesktop.DBus.ObjectManager")
-        self._device_path_regex = re.compile('^/org/bluez/' + adapter_name + '/dev((_[A-Z0-9]{2}){6})$')
+            mqttc.connect_async(mqtt_host, mqtt_port)
+            self._adapter = mqttc
+        except Exception as e:
+            raise _error_from_mqtt_error(e) from e
         self._devices = {}
         self._discovered_devices = {}
         self._interface_added_signal = None
         self._properties_changed_signal = None
         self._main_loop = None
-
-        self.update_devices()
+        mqttc.connect_async(mqtt_host, mqtt_port, 60)
+        mqttc.loop_start()
 
     @property
     def is_adapter_powered(self):
-        return self._adapter_properties.Get('org.bluez.Adapter1', 'Powered') == 1
+        return self._adapter_properties
 
     @is_adapter_powered.setter
     def is_adapter_powered(self, powered):
-        return self._adapter_properties.Set('org.bluez.Adapter1', 'Powered', dbus.Boolean(powered))
+        self._adapter_properties = powered
+
 
     def run(self):
         """
@@ -65,20 +57,6 @@ class DeviceManager:
 
         if self._main_loop:
             return
-
-        self._interface_added_signal = self._bus.add_signal_receiver(
-            self._interfaces_added,
-            dbus_interface='org.freedesktop.DBus.ObjectManager',
-            signal_name='InterfacesAdded')
-
-        # TODO: Also listen to 'interfaces removed' events?
-
-        self._properties_changed_signal = self._bus.add_signal_receiver(
-            self._properties_changed,
-            dbus_interface=dbus.PROPERTIES_IFACE,
-            signal_name='PropertiesChanged',
-            arg0='org.bluez.Device1',
-            path_keyword='path')
 
         def disconnect_signals():
             for device in self._devices.values():
@@ -103,26 +81,22 @@ class DeviceManager:
             self._main_loop = None
 
     def _manage_device(self, device):
-        existing_device = self._devices.get(device.mac_address)
-        if existing_device is not None:
-            existing_device.invalidate()
-        self._devices[device.mac_address] = device
+        """
+        Defunct
+        """
+        pass
 
     def update_devices(self):
-        managed_objects = self._object_manager.GetManagedObjects().items()
-        possible_mac_addresses = [self._mac_address(path) for path, _ in managed_objects]
-        mac_addresses = [m for m in possible_mac_addresses if m is not None]
-        new_mac_addresses = [m for m in mac_addresses if m not in self._devices]
-        for mac_address in new_mac_addresses:
-            self.make_device(mac_address)
-        # TODO: Remove devices from `_devices` that are no longer managed, i.e. deleted
-
+        """
+        Defunct
+        """
+        pass
+        
     def devices(self):
         """
         Returns all known Bluetooth devices.
         """
         self.update_devices()
-        return self._devices.values()
 
     def start_discovery(self, service_uuids=[]):
         """Starts a discovery for BLE devices with given service UUIDs.
@@ -159,6 +133,12 @@ class DeviceManager:
                 pass
             else:
                 raise _error_from_dbus_error(e)
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties):
+        pass
+
+    def _on_message(self, client, userdata, msg):
+        pass
 
     def _interfaces_added(self, path, interfaces):
         self._device_discovered(path, interfaces)
@@ -673,13 +653,7 @@ class Characteristic:
         self.service.device.characteristic_enable_notifications_failed(characteristic=self, error=error)
 
 
-def _error_from_dbus_error(e):
+def _error_from_mqtt_error(e):
     return {
-        'org.bluez.Error.Failed': errors.Failed(e.get_dbus_message()),
-        'org.bluez.Error.InProgress': errors.InProgress(e.get_dbus_message()),
-        'org.bluez.Error.InvalidValueLength': errors.InvalidValueLength(e.get_dbus_message()),
-        'org.bluez.Error.NotAuthorized': errors.NotAuthorized(e.get_dbus_message()),
-        'org.bluez.Error.NotPermitted': errors.NotPermitted(e.get_dbus_message()),
-        'org.bluez.Error.NotSupported': errors.NotSupported(e.get_dbus_message()),
-        'org.freedesktop.DBus.Error.AccessDenied': errors.AccessDenied("Root permissions required")
-    }.get(e.get_dbus_name(), errors.Failed(e.get_dbus_message()))
+        'mqtt': errors.AccessDenied("MQTT error")
+    }.get('mqtt', errors.Failed(e))
