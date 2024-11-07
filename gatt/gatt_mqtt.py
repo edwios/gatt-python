@@ -490,7 +490,7 @@ class Device:
         Refresh device services and characteristics.
         """
         print(f"Connecting to device {self.mac_address}...")
-        self.service_resolved()
+        self.services_resolved()
 
     def _connect(self):
         self._connect_retry_attempt += 1
@@ -602,7 +602,7 @@ class Device:
         # To be implemented by subclass
         pass
 
-    def service_resolved(self):
+    def services_resolved(self):
         """
         Obtains the GATT Services and Characteristics information of the device.
         """
