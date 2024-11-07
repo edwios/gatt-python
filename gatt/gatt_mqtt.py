@@ -652,7 +652,7 @@ class Device:
         print(f"getAttribute command accepted by gateway for device {self.mac_address}.")
 
         # Wait for reportAttribute
-        report_attribute = self.manager.wait_for_report_attribute(self.manager.device_code, timeout=30)
+        report_attribute = self.manager.wait_for_report_attribute(command_id, timeout=30)
         if not report_attribute:
             self.connect_failed("No reportAttribute received.")
             return
