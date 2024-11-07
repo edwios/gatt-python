@@ -14,7 +14,7 @@ class DeviceManager:
     filters devices based on provided names, and maintains a list of applicable devices.
     """
 
-    def __init__(self, host_name, mqtt_host, mqtt_port, mqtt_user, mqtt_password):
+    def __init__(self, host_name, mqtt_host, mqtt_port, mqtt_user, mqtt_password, target_host_name):
         """
         Initializes the DeviceManager by establishing an MQTT connection.
 
@@ -29,6 +29,7 @@ class DeviceManager:
         self.mqtt_port = mqtt_port
         self.mqtt_user = mqtt_user
         self.mqtt_password = mqtt_password
+        self.target_host_name = target_host_name
 
         self.listener = None
         self.adapter_name = 'mqtt'
@@ -56,9 +57,9 @@ class DeviceManager:
 
         # Configure TLS
         self._adapter.tls_set(
-            ca_certs=None,  # Use default CA certificates
-            certfile=None,
-            keyfile=None,
+            ca_certs='certs/mqtt.crt',  # Use default CA certificates
+            certfile='certs/mqtt.cert',
+            keyfile='certs/mqtt.key',
             cert_reqs=ssl.CERT_REQUIRED,
             tls_version=ssl.PROTOCOL_TLSv1_2,
             ciphers=None
@@ -113,7 +114,7 @@ class DeviceManager:
         if rc == 0:
             self.is_adapter_powered = True
             # Subscribe to the event topic
-            event_topic = f"telldus/tellstick/{self.host_name}/event"
+            event_topic = f"telldus/tellstick/{self.target_host_name}/event"
             client.subscribe(event_topic)
             print(f"Connected to MQTT broker and subscribed to {event_topic}")
         else:
@@ -145,7 +146,7 @@ class DeviceManager:
         try:
             payload = msg.payload.decode('utf-8')
             data = json.loads(payload)
-
+            # print(f'MQTT msg:\n{payload}\n')
             # Navigate to the device_list in the JSON payload
             device_list = data.get('data', {}).get('value', {}).get('device_list', [])
 
@@ -162,7 +163,7 @@ class DeviceManager:
                                     self._devices[mac] = device
                                     print(f"Discovered device: {dev_name} with MAC: {mac}")
                             # Update device attributes if necessary
-                            self._devices[mac].update_attributes(device_info)
+                            # self._devices[mac].update_attributes(device_info)
             else:
                 # Discovery is not active; ignore incoming device information
                 pass
@@ -317,8 +318,9 @@ class Device:
     def __init__(self, mac_address, manager):
         self.mac_address = mac_address
         self.manager = manager
-        self.attributes = {}
-        self.alias = None  # Assuming alias attribute exists
+        self._connect_retry_attempt = 0
+        self._is_services_resolved = False
+        self._is_connected = False
 
     def advertised(self):
         """
@@ -326,34 +328,17 @@ class Device:
         """
         pass
 
-    def is_registered(self):
-        # TODO: Implement, see __init__
-        return False
-
-    def register(self):
-        # TODO: Implement, see __init__
-        return
-
     def invalidate(self):
-        self._disconnect_signals()
+        pass
 
     def connect(self):
         """
-        Connects to the device. Blocks until the connection was successful.
+        Refresh device services and characteristics.
         """
-        self._connect_retry_attempt = 0
-        self._connect_signals()
         self._connect()
 
     def _connect(self):
         self._connect_retry_attempt += 1
-
-    def _connect_signals(self):
-        pass
-
-    def _connect_service_signals(self):
-        for service in self.services:
-            service._connect_signals()
 
     def connect_succeeded(self):
         """
@@ -366,7 +351,7 @@ class Device:
         """
         Called when the connection could not be established.
         """
-        self._disconnect_signals()
+        pass
 
     def disconnect(self):
         """
@@ -380,24 +365,17 @@ class Device:
         """
         self.services = []
 
-    def _disconnect_signals(self):
-        pass
-
-    def _disconnect_service_signals(self):
-        for service in self.services:
-            service._disconnect_signals()
-
     def is_connected(self):
         """
-        Returns `True` if the device is connected, otherwise `False`.
+        Returns `True` if the device was refreshed successfully, otherwise `False`.
         """
-        pass
+        return self._is_connected
 
     def is_services_resolved(self):
         """
         Returns `True` is services are discovered, otherwise `False`.
         """
-        pass
+        return self._is_services_resolved
 
     def properties_changed(self, sender, changed_properties, invalidated_properties):
         """
@@ -466,35 +444,19 @@ class Service:
     Represents a GATT service.
     """
 
-    def __init__(self, device, path, uuid):
+    def __init__(self, device, uuid):
         # TODO: Don'T requore `path` argument, it can be calculated from device's path and uuid
         self.device = device
         self.uuid = uuid
         self.characteristics = []
         self.characteristics_resolved()
 
-    def _connect_signals(self):
-        self._connect_characteristic_signals()
-
-    def _connect_characteristic_signals(self):
-        for characteristic in self.characteristics:
-            characteristic._connect_signals()
-
-    def _disconnect_signals(self):
-        self._disconnect_characteristic_signals()
-
-    def _disconnect_characteristic_signals(self):
-        for characteristic in self.characteristics:
-            characteristic._disconnect_signals()
 
     def characteristics_resolved(self):
         """
         Called when all service's characteristics got resolved.
         """
-        self._disconnect_characteristic_signals()
-
-        self._connect_characteristic_signals()
-
+        pass
 
 class Descriptor:
     """
@@ -524,12 +486,6 @@ class Characteristic:
         # TODO: Don't require `path` parameter, it can be calculated from service's path and uuid
         self.service = service
         self.uuid = uuid
-
-    def _connect_signals(self):
-        pass
-
-    def _disconnect_signals(self):
-        pass
 
     def properties_changed(self, properties, changed_properties, invalidated_properties):
         """
