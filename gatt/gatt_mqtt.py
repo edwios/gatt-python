@@ -181,23 +181,25 @@ class DeviceManager:
             # Handle reportAttribute messages
             elif message_type == 'reportAttribute':
                 print(f'Handling {message_type}')
-                device_code = data.get('deviceCode', '')
-                acquired = self._commands_lock.acquire(blocking=False)
-                if acquired:
-                    with self._commands_lock:
-                        print("Acquiring lock at _on_message 2")
-                        try:
-                            print(f'Looking for {device_code}')
-                            # Find the command associated with this device_code
-                            for cmd_id, command in self._pending_commands.items():
-                                if command.get('device_code') == device_code:
-                                    command['report'] = data
-                                    command['report_event'].set()
-                                    print(f"Received reportAttribute for command ID: {cmd_id}")
-                                    break
-                        finally:
-                            self._commands_lock.release()
-                            print("Released acquired lock at _on_message 2")
+                attr = data.get('data', {}).get('attribute', '').strip()
+                if attr == "mod.ble.inspect":
+                    device_code = data.get('deviceCode', '')
+                    acquired = self._commands_lock.acquire(blocking=False)
+                    if acquired:
+                        with self._commands_lock:
+                            print("Acquiring lock at _on_message 2")
+                            try:
+                                print(f'Looking for {device_code}')
+                                # Find the command associated with this device_code
+                                for cmd_id, command in self._pending_commands.items():
+                                    if command.get('device_code') == device_code:
+                                        command['report'] = data
+                                        command['report_event'].set()
+                                        print(f"Received reportAttribute for command ID: {cmd_id}")
+                                        break
+                            finally:
+                                self._commands_lock.release()
+                                print("Released acquired lock at _on_message 2")
 
             else:
                 # Other message types can be handled here
@@ -544,12 +546,6 @@ class Device:
     def properties_changed(self, sender, changed_properties, invalidated_properties):
         """
         Called when a device property has changed or got invalidated.
-        """
-        pass
-
-    def services_resolved(self):
-        """
-        Called when all device's services and characteristics got resolved.
         """
         pass
 
