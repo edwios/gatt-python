@@ -25,7 +25,10 @@ class DeviceManager:
         :param mqtt_user: MQTT username.
         :param mqtt_password: MQTT password.
         :param target_host_name: The target host name for MQTT topics.
+        :param device_code: UUID of gateway
+        :param gateway_mac: MAC of gateway
         """
+        print(f'Initialising DeviceManager')
         self.host_name = host_name
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
@@ -47,6 +50,7 @@ class DeviceManager:
         self._stop_event = threading.Event()
 
         # Command tracking
+        # Maps command_id to a dict with 'event', 'response', 'report_event', 'report', 'characteristic', 'command_type'
         self._pending_commands = {}
         self._commands_lock = threading.RLock()
 
@@ -156,50 +160,36 @@ class DeviceManager:
             data = json.loads(payload)
             # print(f'MQTT msg:\n{payload}\n')
             message_type = data.get('type', '')
+            current_device_code = data.get('deviceCode', '')
+            command_id = None
+
             # Handle cmdResult messages
             if message_type == 'cmdResult':
                 print(f'Handling {message_type}')
-                cmd_id = data.get('data', {}).get('id', '').strip()
-                print(f'id {cmd_id} with Pending commands: {self._pending_commands}')
-                acquired = self._commands_lock.acquire(blocking=False)
-                if acquired:
-                    with self._commands_lock:
-                        print("Acquiring lock at _on_message 1")
-                        try:
-                            print(f'Looking for {cmd_id}')
-                            if cmd_id in self._pending_commands:
-                                print(f'Found {cmd_id}')
-                                command = self._pending_commands[cmd_id]
-                                command['response'] = data
-                                command['event'].set()
-                                print(f"Received cmdResult for command ID: {cmd_id}")
-                        finally:
-                            self._commands_lock.release()
-                            print("Released acquired lock at _on_message 1")
-                else:
-                    print("Failed to acquired lock at _on_message 1")
+                cmd_id_raw = data.get('data', {}).get('id', '').strip()
+                print(f'id {cmd_id_raw} with Pending commands: {self._pending_commands}')
+                with self._commands_lock:
+                    command_entry = self._pending_commands.get(cmd_id_raw)
+                    if command_entry:
+                        command_entry['response'] = data
+                        command_entry['event'].set()
+                        print(f"Received cmdResult for command ID: {cmd_id_raw}")
             # Handle reportAttribute messages
             elif message_type == 'reportAttribute':
                 print(f'Handling {message_type}')
-                attr = data.get('data', {}).get('attribute', '').strip()
-                if attr == "mod.ble.inspect":
+                attribute = data.get('data', {}).get('attribute', '').strip()
+                if attribute in ["mod.ble.attr", "mod.ble.inspect"]:
                     device_code = data.get('deviceCode', '')
-                    acquired = self._commands_lock.acquire(blocking=False)
-                    if acquired:
-                        with self._commands_lock:
-                            print("Acquiring lock at _on_message 2")
-                            try:
-                                print(f'Looking for {device_code}')
-                                # Find the command associated with this device_code
-                                for cmd_id, command in self._pending_commands.items():
-                                    if command.get('device_code') == device_code:
-                                        command['report'] = data
-                                        command['report_event'].set()
-                                        print(f"Received reportAttribute for command ID: {cmd_id}")
-                                        break
-                            finally:
-                                self._commands_lock.release()
-                                print("Released acquired lock at _on_message 2")
+                    # Find the command associated with this device_code
+                    with self._commands_lock:
+                        for cmd_id, command in self._pending_commands.items():
+                            if (command.get('device_code') == device_code or 
+                                command.get('service_uuid') == data.get('data', {}).get('value', {}).get('service', '') and 
+                                command.get('characteristic_uuid') == data.get('data', {}).get('value', {}).get('characteristic', '')):
+                                command['report'] = data
+                                command['report_event'].set()
+                                print(f"Received reportAttribute for command ID: {cmd_id}")
+                                break
 
             else:
                 # Other message types can be handled here
@@ -231,31 +221,29 @@ class DeviceManager:
         except Exception as e:
             print(f"Error processing MQTT message: {e}")
 
-    def send_command(self, command_json, command_id):
+    def send_command(self, command_json, command_id, command_type=None, characteristic=None):
         """
         Sends a command JSON to the MQTT broker and tracks the command by its UUID.
 
         :param command_json: The command JSON to send.
         :param command_id: The UUID of the command.
+        :param command_type: Type of the command (e.g., 'read', 'write', 'notify').
+        :param characteristic: The Characteristic instance associated with this command.
         :return: None
         """
-        acquired = self._commands_lock.acquire(blocking=False)
-        if acquired:
-            with self._commands_lock:
-                print("Acquiring lock at send_command")
-                try:
-                    self._pending_commands[command_id] = {
-                        'event': threading.Event(),
-                        'response': None,
-                        'report_event': threading.Event(),
-                        'report': None,
-                        'device_code': command_json.get('deviceCode', '')  # Added device_code tracking
-                    }
-                finally:
-                    self._commands_lock.release()
-                    print("Released acquired lock at send_command")
-        else:
-            print("Failed to acquired lock at send_command")
+        with self._commands_lock:
+            print("Acquiring lock at send_command")
+            try:
+                self._pending_commands[command_id] = {
+                    'event': threading.Event(),
+                    'response': None,
+                    'report_event': threading.Event(),
+                    'report': None,
+                    'characteristic': characteristic,
+                    'command_type': command_type
+                }
+            finally:
+                print("Released acquired lock at send_command")
 
         # Publish the command to the appropriate topic
         command_topic = f"telldus/tellstick/{self.target_host_name}/command"
@@ -268,20 +256,14 @@ class DeviceManager:
 
         :param command_id: The UUID of the command.
         :param timeout: Timeout in seconds.
-        :return: The cmdResult data if received, else None.
+        :return: The cmdResult data if received, else None
         """
-        command = None
-        acquired = self._commands_lock.acquire(blocking=False)
-        if acquired:
-            with self._commands_lock:
-                print("Acquiring lock at wait_for_cmd_result")
-                try:
-                    command = self._pending_commands.get(command_id)
-                finally:
-                    self._commands_lock.release()
-                    print("Released acquired lock at wait_for_cmd_result")
-        else:
-            print("Failed to acquired lock at wait_for_cmd_result")
+        with self._commands_lock:
+            print("Acquiring lock at wait_for_cmd_result")
+            try:
+                command = self._pending_commands.get(command_id)
+            finally:
+                print("Released acquired lock at wait_for_cmd_result")
 
         if command:
             event_set = command['event'].wait(timeout)
@@ -291,33 +273,27 @@ class DeviceManager:
                 print(f"Timeout waiting for cmdResult of command ID: {command_id}")
         return None
 
-    def wait_for_report_attribute(self, device_code, timeout=30):
+    def wait_for_report_attribute(self, command_id, timeout=30):
         """
         Waits for the reportAttribute of a specific command.
 
-        :param device_code: The UUID of the gateway.
+        :param command_id: The UUID of the command.
         :param timeout: Timeout in seconds.
-        :return: The reportAttribute data if received, else None.
+        :return: The reportAttribute data if received, else None
         """
-        command = None
-        acquired = self._commands_lock.acquire(blocking=False)
-        if acquired:
-            with self._commands_lock:
-                print("Acquiring lock at wait_for_report_attribute")
-                try:
-                    command = self._pending_commands.get(device_code)
-                finally:
-                    self._commands_lock.release()
-                    print("Released acquired lock at wait_for_report_attribute")
-        else:
-            print("Failed to acquired lock at wait_for_report_attribute")
-            
+        with self._commands_lock:
+            print("Acquiring lock at wait_for_report_attribute")
+            try:
+                command = self._pending_commands.get(command_id)
+            finally:
+                print("Released acquired lock at wait_for_report_attribute")
+
         if command:
             event_set = command['report_event'].wait(timeout)
             if event_set:
                 return command['report']
             else:
-                print(f"Timeout waiting for reportAttribute of command ID: {device_code}")
+                print(f"Timeout waiting for reportAttribute of command ID: {command_id}")
         return None
 
     def run(self):
@@ -352,9 +328,11 @@ class DeviceManager:
 
         :return: A list of Device instances.
         """
-        return list(self._devices.values())
+        devices = list(self._devices.values())
+        print(f'DeviceManager: devices {devices}')
+        return devices
 
-    def start_discovery(self, dev_names=[]):
+    def start_discovery(self, dev_names=None):
         """
         Starts discovery for BLE devices with the specified device names.
 
@@ -456,7 +434,6 @@ class DeviceManager:
         """
         # Implement any necessary update logic here
         pass
-
 
 class Device:
     """
@@ -603,11 +580,13 @@ class Device:
         Obtains the GATT Services and Characteristics information of the device.
         """
         command_id = str(uuid.uuid4())
+        command_id_with_newline = f"{command_id}\u000a"
         current_time = int(time.time())
 
         # Assuming device_code is already set; otherwise, it should be set appropriately
         if not self.manager.target_host_name:
             print("Target host name is not set in DeviceManager.")
+            self.connect_failed("Target host name not set")
             return
 
         get_attribute_command = {
@@ -626,13 +605,13 @@ class Device:
                     "attribute": "mod.ble.inspect",
                     "ep": 1
                 },
-                "id": f"{command_id}\u000a"
+                "id": command_id_with_newline
             },
             "to": "BLE"
         }
 
         print(f"Sending getAttribute command to inspect device {self.mac_address} with command ID: {command_id}")
-        self.manager.send_command(get_attribute_command, command_id)
+        self.manager.send_command(get_attribute_command, command_id, command_type="inspect", characteristic=None)
 
         # Wait for cmdResult
         cmd_result = self.manager.wait_for_cmd_result(command_id, timeout=30)
@@ -693,7 +672,6 @@ class Device:
 
     # Additional methods can be implemented as needed
 
-
 class Service:
     """
     Represents a GATT service.
@@ -717,7 +695,6 @@ class Service:
         Called when all service's characteristics got resolved.
         """
         pass
-
 
 class Descriptor:
     """
@@ -781,65 +758,297 @@ class Characteristic:
         """
         pass
 
-    def read_value(self, offset=0):
+    def read_value(self, timeout=30):
         """
         Reads the value of this characteristic.
 
-        When successful, `characteristic_value_updated()` of the related device will be called,
-        otherwise `characteristic_read_value_failed()` is invoked.
+        :param timeout: Timeout in seconds for waiting for the response.
+        :return: The value of the characteristic in hexadecimal string if successful, else None.
+        """
+        if "read" not in self.properties.lower():
+            print(f"Characteristic {self.uuid} does not have read property.")
+            return None
 
-        :param offset: Offset from where to start reading the bytes (defaults to 0).
-        """
-        pass
+        command_id = str(uuid.uuid4())
+        command_id_with_newline = f"{command_id}\u000a"
+        current_time = int(time.time())
 
-    def write_value(self, value, offset=0):
-        """
-        Attempts to write a value to the characteristic.
+        get_attribute_command = {
+            "mac": self.service.device.manager.gateway_mac,
+            "type": "cmd",
+            "time": current_time,
+            "from": "CLOUD",
+            "deviceCode": self.service.device.manager.device_code if self.service.device.manager.device_code else "00000000-0000-0000-0000-000000000000",
+            "data": {
+                "command": "getAttribute",
+                "arguments": {
+                    "mac": self.service.device.mac_address,
+                    "value": {
+                        "mac": self.service.device.mac_address,
+                        "service": self.service.uuid,
+                        "characteristic": self.uuid,
+                        "handle": self.handle
+                    },
+                    "attribute": "mod.ble.attr.get",
+                    "ep": 1
+                },
+                "id": command_id_with_newline
+            },
+            "to": "BLE"
+        }
 
-        Success or failure will be notified by calls to `write_value_succeeded` or `write_value_failed` respectively.
+        try:
+            # Send the getAttribute command
+            self.service.device.manager.send_command(get_attribute_command, command_id_with_newline)
+            print(f"Sent getAttribute command with ID: {command_id}")
 
-        :param value: Array of bytes to be written.
-        :param offset: Offset from where to start writing the bytes (defaults to 0).
-        """
-        pass
+            # Wait for cmdResult
+            cmd_result = self.service.device.manager.wait_for_cmd_result(command_id, timeout=timeout)
+            if not cmd_result:
+                print(f"Timeout waiting for cmdResult of getAttribute command ID: {command_id}")
+                self.characteristic_read_value_failed("Timeout waiting for cmdResult")
+                return None
 
-    def _write_value_succeeded(self):
-        """
-        Called when the write request has succeeded.
-        """
-        self.service.device.characteristic_write_value_succeeded(characteristic=self)
+            cmd_code = cmd_result.get('data', {}).get('code', -1)
+            if cmd_code != 0:
+                print(f"getAttribute command failed with code: {cmd_code}")
+                self.characteristic_read_value_failed(f"Command failed with code: {cmd_code}")
+                return None
 
-    def _write_value_failed(self, dbus_error):
-        """
-        Called when the write request has failed.
-        """
-        self.service.device.characteristic_write_value_failed(characteristic=self, error=dbus_error)
+            print(f"getAttribute command accepted for command ID: {command_id}")
 
-    def enable_notifications(self, enabled=True):
-        """
-        Enables or disables value change notifications.
+            # Wait for reportAttribute
+            report_attribute = self.service.device.manager.wait_for_report_attribute(command_id, timeout=timeout)
+            if not report_attribute:
+                print(f"Timeout waiting for reportAttribute of getAttribute command ID: {command_id}")
+                self.characteristic_read_value_failed("Timeout waiting for reportAttribute")
+                return None
 
-        Success or failure will be notified by calls to `characteristic_enable_notifications_succeeded`
-        or `enable_notifications_failed` respectively.
+            # Extract the characteristic value
+            data = report_attribute.get('data', {}).get('value', {})
+            if data.get('service') != self.service.uuid or data.get('characteristic') != self.uuid:
+                print("Received reportAttribute does not match the requested service and characteristic UUIDs.")
+                self.characteristic_read_value_failed("Mismatched service or characteristic UUIDs")
+                return None
 
-        Each time when the device notifies a new value, `characteristic_value_updated()` of the related
-        device will be called.
+            char_data = data.get('data', '')
+            self.value = char_data
+            self.hexvalue = char_data  # Assuming the data is already in hex string format
+            print(f"Read value from Characteristic {self.uuid}: {self.hexvalue}")
+            self.characteristic_value_updated(self.hexvalue)
+            return self.hexvalue
 
-        :param enabled: True to enable notifications, False to disable.
-        """
-        pass
+        except Exception as e:
+            print(f"Exception during read_value: {e}")
+            self.characteristic_read_value_failed(str(e))
+            return None
 
-    def _enable_notifications_succeeded(self):
+    def write_value(self, value, timeout=30):
         """
-        Called when notification enabling has succeeded.
-        """
-        self.service.device.characteristic_enable_notifications_succeeded(characteristic=self)
+        Writes a value to this characteristic.
 
-    def _enable_notifications_failed(self, error):
+        :param value: The value to write as a hexadecimal string.
+        :param timeout: Timeout in seconds for waiting for the response.
+        :return: True if write was successful, False otherwise.
         """
-        Called when notification enabling has failed.
+        if "write" not in self.properties.lower():
+            print(f"Characteristic {self.uuid} does not have write property.")
+            return False
+
+        # Validate that the value is a hexadecimal string
+        if not isinstance(value, str) or not all(c in '0123456789abcdefABCDEF' for c in value):
+            print("Value to write must be a hexadecimal string.")
+            self.characteristic_write_value_failed("Invalid value format. Must be hexadecimal string.")
+            return False
+
+        command_id = str(uuid.uuid4())
+        command_id_with_newline = f"{command_id}\u000a"
+        current_time = int(time.time())
+
+        set_attribute_command = {
+            "mac": self.service.device.manager.gateway_mac,
+            "type": "cmd",
+            "time": current_time,
+            "from": "CLOUD",
+            "deviceCode": self.service.device.manager.device_code if self.service.device.manager.device_code else "00000000-0000-0000-0000-000000000000",
+            "data": {
+                "command": "setAttribute",
+                "arguments": {
+                    "mac": self.service.device.mac_address,
+                    "value": {
+                        "mac": self.service.device.mac_address,
+                        "service": self.service.uuid,
+                        "data": value,
+                        "characteristic": self.uuid,
+                        "handle": self.handle
+                    },
+                    "attribute": "mod.ble.attr.set",
+                    "ep": 1
+                },
+                "id": command_id_with_newline
+            },
+            "to": "BLE"
+        }
+
+        try:
+            # Send the setAttribute command
+            self.service.device.manager.send_command(set_attribute_command, command_id_with_newline)
+            print(f"Sent setAttribute command with ID: {command_id} to write value: {value}")
+
+            # Wait for cmdResult
+            cmd_result = self.service.device.manager.wait_for_cmd_result(command_id, timeout=timeout)
+            if not cmd_result:
+                print(f"Timeout waiting for cmdResult of setAttribute command ID: {command_id}")
+                self.characteristic_write_value_failed("Timeout waiting for cmdResult")
+                return False
+
+            cmd_code = cmd_result.get('data', {}).get('code', -1)
+            if cmd_code != 0:
+                print(f"setAttribute command failed with code: {cmd_code}")
+                self.characteristic_write_value_failed(f"Command failed with code: {cmd_code}")
+                return False
+
+            print(f"setAttribute command succeeded for command ID: {command_id}")
+            self.value = value
+            self.hexvalue = value
+            self.characteristic_write_value_succeeded()
+            return True
+
+        except Exception as e:
+            print(f"Exception during write_value: {e}")
+            self.characteristic_write_value_failed(str(e))
+            return False
+
+    def enable_notifications(self, notify=True, timeout=30):
         """
-        self.service.device.characteristic_enable_notifications_failed(characteristic=self, error=error)
+        Configures the characteristic for notifications or indications.
+
+        :param notify: True to enable notifications, False to disable. To enable indications, pass 'indicate'.
+        :param timeout: Timeout in seconds for waiting for the response.
+        :return: True if configuration was successful, False otherwise.
+        """
+        if "notify" not in self.properties.lower() and "indicate" not in self.properties.lower():
+            print(f"Characteristic {self.uuid} does not support notifications or indications.")
+            self.characteristic_enable_notifications_failed("Notifications/Indications not supported.")
+            return False
+
+        # Determine the mode
+        if isinstance(notify, str) and notify.lower() == 'indicate':
+            mode = 2
+        elif isinstance(notify, bool):
+            mode = 1 if notify else 0
+        else:
+            print("Invalid parameter for notify. Must be True, False, or 'indicate'.")
+            self.characteristic_enable_notifications_failed("Invalid parameter for notify.")
+            return False
+
+        # If disabling notifications/indications
+        if mode == 0:
+            attribute = "mod.ble.attr.notify"
+        else:
+            attribute = "mod.ble.attr.notify"  # Assuming 'notify' attribute handles both notify and indicate
+
+        command_id = str(uuid.uuid4())
+        command_id_with_newline = f"{command_id}\u000a"
+        current_time = int(time.time())
+
+        set_attribute_command = {
+            "mac": self.service.device.manager.gateway_mac,
+            "type": "cmd",
+            "time": current_time,
+            "from": "CLOUD",
+            "deviceCode": self.service.device.manager.device_code if self.service.device.manager.device_code else "00000000-0000-0000-0000-000000000000",
+            "data": {
+                "command": "setAttribute",
+                "arguments": {
+                    "mac": self.service.device.mac_address,
+                    "value": {
+                        "mac": self.service.device.mac_address,
+                        "service": self.service.uuid,
+                        "mode": mode,
+                        "characteristic": self.uuid,
+                        "handle": self.handle
+                    },
+                    "attribute": attribute,
+                    "ep": 1
+                },
+                "id": command_id_with_newline
+            },
+            "to": "BLE"
+        }
+
+        try:
+            # Send the setAttribute command
+            self.service.device.manager.send_command(set_attribute_command, command_id_with_newline)
+            print(f"Sent setAttribute command with ID: {command_id} to set notifications mode: {mode}")
+
+            # Wait for cmdResult
+            cmd_result = self.service.device.manager.wait_for_cmd_result(command_id, timeout=timeout)
+            if not cmd_result:
+                print(f"Timeout waiting for cmdResult of setAttribute command ID: {command_id}")
+                self.characteristic_enable_notifications_failed("Timeout waiting for cmdResult")
+                return False
+
+            cmd_code = cmd_result.get('data', {}).get('code', -1)
+            if cmd_code != 0:
+                print(f"setAttribute command failed with code: {cmd_code}")
+                self.characteristic_enable_notifications_failed(f"Command failed with code: {cmd_code}")
+                return False
+
+            print(f"setAttribute command succeeded for command ID: {command_id}")
+            self.characteristic_enable_notifications_succeeded()
+            return True
+
+        except Exception as e:
+            print(f"Exception during enable_notifications: {e}")
+            self.characteristic_enable_notifications_failed(str(e))
+            return False
+
+    def characteristic_value_updated(self, value):
+        """
+        Updates the characteristic value when a notification or indication is received.
+
+        :param value: The new value of the characteristic as a hexadecimal string.
+        """
+        self.value = value
+        self.hexvalue = value
+        print(f"Characteristic {self.uuid} value updated via notification/indication: {self.hexvalue}")
+
+    def characteristic_read_value_failed(self, error):
+        """
+        Handles a failed read operation.
+
+        :param error: The error message or code.
+        """
+        print(f"Failed to read value from Characteristic {self.uuid}: {error}")
+
+    def characteristic_write_value_succeeded(self):
+        """
+        Handles a successful write operation.
+        """
+        print(f"Successfully wrote value to Characteristic {self.uuid}.")
+
+    def characteristic_write_value_failed(self, error):
+        """
+        Handles a failed write operation.
+
+        :param error: The error message or code.
+        """
+        print(f"Failed to write value to Characteristic {self.uuid}: {error}")
+
+    def characteristic_enable_notifications_succeeded(self):
+        """
+        Handles successful notification/indication configuration.
+        """
+        print(f"Successfully configured notifications/indications for Characteristic {self.uuid}.")
+
+    def characteristic_enable_notifications_failed(self, error):
+        """
+        Handles failed notification/indication configuration.
+
+        :param error: The error message or code.
+        """
+        print(f"Failed to configure notifications/indications for Characteristic {self.uuid}: {error}")
 
 
 def _error_from_mqtt_error(e):
