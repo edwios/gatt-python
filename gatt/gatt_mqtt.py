@@ -209,7 +209,7 @@ class DeviceManager:
                                 device = self.make_device(mac)
                                 if device:
                                     self._devices[mac] = device
-                                    print(f"Discovered device: {dev_name} with MAC: {mac}")
+                                    print(f"Discovered device named {dev_name} with MAC: {mac}")
                             # Update device attributes if necessary
                             # self._devices[mac].update_attributes(device_info)
             else:
@@ -329,7 +329,7 @@ class DeviceManager:
         :return: A list of Device instances.
         """
         devices = list(self._devices.values())
-        print(f'DeviceManager: devices {devices}')
+        print(f'DeviceManager: # devices {len(devices)}')
         return devices
 
     def start_discovery(self, dev_names=None):
@@ -345,7 +345,7 @@ class DeviceManager:
         self._dev_names = set(dev_names)
         self._discovery_active = True
         self._devices.clear()
-        print(f"Started discovery for devices: {self._dev_names}")
+        print(f"Started discovery for devices with name: {self._dev_names}")
 
     def stop_discovery(self):
         """
