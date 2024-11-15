@@ -167,7 +167,7 @@ class DeviceManager:
             if message_type == 'cmdResult':
                 print(f'Handling {message_type}')
                 cmd_id_raw = data.get('data', {}).get('id', '').strip()
-                print(f'id {cmd_id_raw} with Pending commands: {self._pending_commands}')
+                # print(f'id {cmd_id_raw} with Pending commands')
                 with self._commands_lock:
                     command_entry = self._pending_commands.get(cmd_id_raw)
                     if command_entry:
@@ -178,17 +178,25 @@ class DeviceManager:
             elif message_type == 'reportAttribute':
                 print(f'Handling {message_type}')
                 attribute = data.get('data', {}).get('attribute', '').strip()
-                if attribute in ["mod.ble.attr", "mod.ble.inspect"]:
-                    device_code = data.get('deviceCode', '')
-                    # Find the command associated with this device_code
+                if attribute == "mod.ble.attr":
+                    service_uuid = data.get('data', {}).get('value', {}).get('service', '')
+                    characteristic_uuid = data.get('data', {}).get('value', {}).get('characteristic', '')
+                    characteristic_data = data.get('data', {}).get('value', {}).get('data', '')
+
+                    # Find the matching command based on service and characteristic UUIDs
                     with self._commands_lock:
                         for cmd_id, command in self._pending_commands.items():
-                            if (command.get('device_code') == device_code or 
-                                command.get('service_uuid') == data.get('data', {}).get('value', {}).get('service', '') and 
-                                command.get('characteristic_uuid') == data.get('data', {}).get('value', {}).get('characteristic', '')):
+                            # Match based on service and characteristic UUIDs
+                            if (command.get('service_uuid', '').lower() == service_uuid.lower() and
+                                command.get('characteristic_uuid', '').lower() == characteristic_uuid.lower()):
                                 command['report'] = data
                                 command['report_event'].set()
                                 print(f"Received reportAttribute for command ID: {cmd_id}")
+
+                                # Invoke the callback only for reportAttribute
+                                characteristic = command.get('characteristic')
+                                if characteristic:
+                                    characteristic.characteristic_value_updated(characteristic, characteristic_data)
                                 break
 
             else:
@@ -240,7 +248,9 @@ class DeviceManager:
                     'report_event': threading.Event(),
                     'report': None,
                     'characteristic': characteristic,
-                    'command_type': command_type
+                    'command_type': command_type,
+                    'service_uuid': self._get_service_uuid(characteristic),
+                    'characteristic_uuid': self._get_characteristic_uuid(characteristic)
                 }
             finally:
                 print("Released acquired lock at send_command")
@@ -249,6 +259,28 @@ class DeviceManager:
         command_topic = f"telldus/tellstick/{self.target_host_name}/command"
         self._adapter.publish(command_topic, payload=json.dumps(command_json), qos=1, retain=False)
         print(f"Sent command ID: {command_id} to topic: {command_topic}")
+
+    def _get_service_uuid(self, characteristic):
+        """
+        Retrieves the service UUID for a given characteristic.
+
+        :param characteristic: The Characteristic instance.
+        :return: Service UUID as a string.
+        """
+        if characteristic and characteristic.service:
+            return characteristic.service.uuid
+        return ''
+
+    def _get_characteristic_uuid(self, characteristic):
+        """
+        Retrieves the characteristic UUID.
+
+        :param characteristic: The Characteristic instance.
+        :return: Characteristic UUID as a string.
+        """
+        if characteristic:
+            return characteristic.uuid
+        return ''
 
     def wait_for_cmd_result(self, command_id, timeout=30):
         """
@@ -328,11 +360,9 @@ class DeviceManager:
 
         :return: A list of Device instances.
         """
-        devices = list(self._devices.values())
-        print(f'DeviceManager: # devices {len(devices)}')
-        return devices
+        return list(self._devices.values())
 
-    def start_discovery(self, dev_names=None):
+    def start_discovery(self, dev_names=[]):
         """
         Starts discovery for BLE devices with the specified device names.
 
@@ -345,7 +375,7 @@ class DeviceManager:
         self._dev_names = set(dev_names)
         self._discovery_active = True
         self._devices.clear()
-        print(f"Started discovery for devices with name: {self._dev_names}")
+        print(f"Started discovery for devices: {self._dev_names}")
 
     def stop_discovery(self):
         """
@@ -435,6 +465,7 @@ class DeviceManager:
         # Implement any necessary update logic here
         pass
 
+
 class Device:
     """
     Represents a BLE GATT Device.
@@ -452,10 +483,9 @@ class Device:
     def advertised(self):
         """
         Called when an advertisement package has been received from the device.
-        Requires device discovery to run.
+        Initiates connection to resolve services.
         """
         print(f"Device {self.mac_address} advertised.")
-        # Potentially initiate connection here if desired
 
     def invalidate(self):
         """
@@ -799,7 +829,7 @@ class Characteristic:
 
         try:
             # Send the getAttribute command
-            self.service.device.manager.send_command(get_attribute_command, command_id_with_newline)
+            self.service.device.manager.send_command(get_attribute_command, command_id_with_newline, command_type="read", characteristic=self)
             print(f"Sent getAttribute command with ID: {command_id}")
 
             # Wait for cmdResult
@@ -835,7 +865,6 @@ class Characteristic:
             self.value = char_data
             self.hexvalue = char_data  # Assuming the data is already in hex string format
             print(f"Read value from Characteristic {self.uuid}: {self.hexvalue}")
-            self.characteristic_value_updated(self.hexvalue)
             return self.hexvalue
 
         except Exception as e:
