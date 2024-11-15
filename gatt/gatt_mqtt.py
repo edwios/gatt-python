@@ -178,7 +178,23 @@ class DeviceManager:
             elif message_type == 'reportAttribute':
                 print(f'Handling {message_type}')
                 attribute = data.get('data', {}).get('attribute', '').strip()
-                if attribute == "mod.ble.attr":
+                target_mac = data.get('data', {}).get('mac', '').strip()
+                if attribute == "mod.ble.connected":
+                    print(f"Received connected event for MAC: {target_mac}")
+                    device = self._devices.get(target_mac)
+                    if device:
+                        device.connect_succeeded()
+                    else:
+                        print(f"No device found with MAC: {target_mac} for connected event.")
+                elif attribute == "mod.ble.disconnected":
+                    print(f"Received disconnected event for MAC: {target_mac}")
+                    device = self._devices.get(target_mac)
+                    if device:
+                        device.disconnect_succeeded()
+                    else:
+                        print(f"No device found with MAC: {target_mac} for disconnected event.")
+                elif attribute == "mod.ble.attr":
+                    # Existing handling for mod.ble.attr
                     service_uuid = data.get('data', {}).get('value', {}).get('service', '')
                     characteristic_uuid = data.get('data', {}).get('value', {}).get('characteristic', '')
                     characteristic_data = data.get('data', {}).get('value', {}).get('data', '')
@@ -196,32 +212,35 @@ class DeviceManager:
                                 # Invoke the callback only for reportAttribute
                                 characteristic = command.get('characteristic')
                                 if characteristic:
-                                    characteristic.characteristic_value_updated(characteristic, characteristic_data)
+                                    characteristic.characteristic_value_updated(characteristic_data)
                                 break
+                else:
+                    # Other reportAttribute messages can be handled here
+                    pass
+
+                # Process device discovery as before
+                device_list = data.get('data', {}).get('value', {}).get('device_list', [])
+
+                if self._discovery_active and self._dev_names:
+                    for device_info in device_list:
+                        dev_name = device_info.get('dev_name', '')
+                        if dev_name in self._dev_names:
+                            # Prefer 'ble_addr' over 'mac' if available
+                            mac = device_info.get('ble_addr') or device_info.get('mac')
+                            if mac:
+                                if mac not in self._devices:
+                                    device = self.make_device(mac)
+                                    if device:
+                                        self._devices[mac] = device
+                                        print(f"Discovered device named {dev_name} with MAC: {mac}")
+                                # Update device attributes if necessary
+                                # self._devices[mac].update_attributes(device_info)
+                else:
+                    # Discovery is not active; ignore incoming device information
+                    pass
 
             else:
                 # Other message types can be handled here
-                pass
-
-            # Process device discovery as before
-            device_list = data.get('data', {}).get('value', {}).get('device_list', [])
-
-            if self._discovery_active and self._dev_names:
-                for device_info in device_list:
-                    dev_name = device_info.get('dev_name', '')
-                    if dev_name in self._dev_names:
-                        # Prefer 'ble_addr' over 'mac' if available
-                        mac = device_info.get('ble_addr') or device_info.get('mac')
-                        if mac:
-                            if mac not in self._devices:
-                                device = self.make_device(mac)
-                                if device:
-                                    self._devices[mac] = device
-                                    print(f"Discovered device named {dev_name} with MAC: {mac}")
-                            # Update device attributes if necessary
-                            # self._devices[mac].update_attributes(device_info)
-            else:
-                # Discovery is not active; ignore incoming device information
                 pass
 
         except json.JSONDecodeError:
@@ -479,6 +498,7 @@ class Device:
         self._is_connected = False
         self.alias = None  # Assuming alias attribute exists
         self.services = []
+        self.connected_event = threading.Event()  # Event to manage connection status
 
     def advertised(self):
         """
@@ -486,6 +506,7 @@ class Device:
         Initiates connection to resolve services.
         """
         print(f"Device {self.mac_address} advertised.")
+        self.connect()
 
     def invalidate(self):
         """
@@ -511,14 +532,18 @@ class Device:
         Will be called when `connect()` has finished connecting to the device.
         Will not be called if the device was already connected.
         """
-        self._is_connected = True
-        print(f"Device {self.mac_address} connected successfully.")
+        if not self._is_connected:
+            self._is_connected = True
+            self.connected_event.set()
+            print(f"Device {self.mac_address} connected successfully.")
 
     def connect_failed(self, error):
         """
         Called when the connection could not be established.
         """
-        self._is_connected = False
+        if self._is_connected:
+            self._is_connected = False
+            self.connected_event.clear()
         print(f"Failed to connect to device {self.mac_address}: {error}")
 
     def disconnect(self):
@@ -529,6 +554,7 @@ class Device:
             print(f"Disconnecting from device {self.mac_address}...")
             # Implement actual disconnection logic here
             self._is_connected = False
+            self.connected_event.clear()
             self.disconnect_succeeded()
 
     def disconnect_succeeded(self):
@@ -556,14 +582,14 @@ class Device:
         """
         pass
 
-    def characteristic_value_updated(self, characteristic, value):
+    def characteristic_value_updated(self, value):
         """
         Called when a characteristic value has changed.
         """
         # To be implemented by subclass
         pass
 
-    def characteristic_read_value_failed(self, characteristic, error):
+    def characteristic_read_value_failed(self, error):
         """
         Called when a characteristic value read command failed.
         """
@@ -702,6 +728,7 @@ class Device:
 
     # Additional methods can be implemented as needed
 
+
 class Service:
     """
     Represents a GATT service.
@@ -725,6 +752,7 @@ class Service:
         Called when all service's characteristics got resolved.
         """
         pass
+
 
 class Descriptor:
     """
@@ -799,22 +827,32 @@ class Characteristic:
             print(f"Characteristic {self.uuid} does not have read property.")
             return None
 
+        device = self.service.device
+        print(f"Attempting to read Characteristic {self.uuid} on device {device.mac_address}")
+
+        # Wait for the device to be connected before proceeding
+        if not device.connected_event.wait(timeout=10):
+            print(f"Device {device.mac_address} not connected within timeout. Cannot read Characteristic {self.uuid}.")
+            device.connect_failed("Connection timeout before read operation")
+            self.characteristic_read_value_failed("Connection timeout before read operation")
+            return None
+
         command_id = str(uuid.uuid4())
         command_id_with_newline = f"{command_id}\u000a"
         current_time = int(time.time())
 
         get_attribute_command = {
-            "mac": self.service.device.manager.gateway_mac,
+            "mac": device.manager.gateway_mac,
             "type": "cmd",
             "time": current_time,
             "from": "CLOUD",
-            "deviceCode": self.service.device.manager.device_code if self.service.device.manager.device_code else "00000000-0000-0000-0000-000000000000",
+            "deviceCode": device.manager.device_code if device.manager.device_code else "00000000-0000-0000-0000-000000000000",
             "data": {
                 "command": "getAttribute",
                 "arguments": {
-                    "mac": self.service.device.mac_address,
+                    "mac": device.mac_address,
                     "value": {
-                        "mac": self.service.device.mac_address,
+                        "mac": device.mac_address,
                         "service": self.service.uuid,
                         "characteristic": self.uuid,
                         "handle": self.handle
@@ -829,11 +867,11 @@ class Characteristic:
 
         try:
             # Send the getAttribute command
-            self.service.device.manager.send_command(get_attribute_command, command_id_with_newline, command_type="read", characteristic=self)
-            print(f"Sent getAttribute command with ID: {command_id}")
+            device.manager.send_command(get_attribute_command, command_id, command_type="read", characteristic=self)
+            print(f"Sent getAttribute command with ID: {command_id} for Characteristic {self.uuid}")
 
             # Wait for cmdResult
-            cmd_result = self.service.device.manager.wait_for_cmd_result(command_id, timeout=timeout)
+            cmd_result = device.manager.wait_for_cmd_result(command_id, timeout=timeout)
             if not cmd_result:
                 print(f"Timeout waiting for cmdResult of getAttribute command ID: {command_id}")
                 self.characteristic_read_value_failed("Timeout waiting for cmdResult")
@@ -848,7 +886,7 @@ class Characteristic:
             print(f"getAttribute command accepted for command ID: {command_id}")
 
             # Wait for reportAttribute
-            report_attribute = self.service.device.manager.wait_for_report_attribute(command_id, timeout=timeout)
+            report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
             if not report_attribute:
                 print(f"Timeout waiting for reportAttribute of getAttribute command ID: {command_id}")
                 self.characteristic_read_value_failed("Timeout waiting for reportAttribute")
@@ -890,22 +928,32 @@ class Characteristic:
             self.characteristic_write_value_failed("Invalid value format. Must be hexadecimal string.")
             return False
 
+        device = self.service.device
+        print(f"Attempting to write to Characteristic {self.uuid} on device {device.mac_address}")
+
+        # Wait for the device to be connected before proceeding
+        if not device.connected_event.wait(timeout=10):
+            print(f"Device {device.mac_address} not connected within timeout. Cannot write Characteristic {self.uuid}.")
+            device.connect_failed("Connection timeout before write operation")
+            self.characteristic_write_value_failed("Connection timeout before write operation")
+            return False
+
         command_id = str(uuid.uuid4())
         command_id_with_newline = f"{command_id}\u000a"
         current_time = int(time.time())
 
         set_attribute_command = {
-            "mac": self.service.device.manager.gateway_mac,
+            "mac": device.manager.gateway_mac,
             "type": "cmd",
             "time": current_time,
             "from": "CLOUD",
-            "deviceCode": self.service.device.manager.device_code if self.service.device.manager.device_code else "00000000-0000-0000-0000-000000000000",
+            "deviceCode": device.manager.device_code if device.manager.device_code else "00000000-0000-0000-0000-000000000000",
             "data": {
                 "command": "setAttribute",
                 "arguments": {
-                    "mac": self.service.device.mac_address,
+                    "mac": device.mac_address,
                     "value": {
-                        "mac": self.service.device.mac_address,
+                        "mac": device.mac_address,
                         "service": self.service.uuid,
                         "data": value,
                         "characteristic": self.uuid,
@@ -921,11 +969,11 @@ class Characteristic:
 
         try:
             # Send the setAttribute command
-            self.service.device.manager.send_command(set_attribute_command, command_id_with_newline)
+            device.manager.send_command(set_attribute_command, command_id, command_type="write", characteristic=self)
             print(f"Sent setAttribute command with ID: {command_id} to write value: {value}")
 
             # Wait for cmdResult
-            cmd_result = self.service.device.manager.wait_for_cmd_result(command_id, timeout=timeout)
+            cmd_result = device.manager.wait_for_cmd_result(command_id, timeout=timeout)
             if not cmd_result:
                 print(f"Timeout waiting for cmdResult of setAttribute command ID: {command_id}")
                 self.characteristic_write_value_failed("Timeout waiting for cmdResult")
@@ -940,7 +988,7 @@ class Characteristic:
             print(f"setAttribute command succeeded for command ID: {command_id}")
             self.value = value
             self.hexvalue = value
-            self.characteristic_write_value_succeeded()
+            self.characteristic_write_value_succeeded(self)
             return True
 
         except Exception as e:
@@ -952,13 +1000,23 @@ class Characteristic:
         """
         Configures the characteristic for notifications or indications.
 
-        :param notify: True to enable notifications, False to disable. To enable indications, pass 'indicate'.
+        :param notify: True to enable notifications, False to disable, or 'indicate' to enable indications.
         :param timeout: Timeout in seconds for waiting for the response.
         :return: True if configuration was successful, False otherwise.
         """
         if "notify" not in self.properties.lower() and "indicate" not in self.properties.lower():
             print(f"Characteristic {self.uuid} does not support notifications or indications.")
-            self.characteristic_enable_notifications_failed("Notifications/Indications not supported.")
+            self.characteristic_enable_notifications_failed(self, "Notifications/Indications not supported.")
+            return False
+
+        device = self.service.device
+        print(f"Attempting to configure notifications/indications for Characteristic {self.uuid} on device {device.mac_address}")
+
+        # Wait for the device to be connected before proceeding
+        if not device.connected_event.wait(timeout=10):
+            print(f"Device {device.mac_address} not connected within timeout. Cannot configure notifications/indications for Characteristic {self.uuid}.")
+            device.connect_failed("Connection timeout before configure notifications/indications")
+            self.characteristic_enable_notifications_failed(self, "Connection timeout before configure notifications/indications")
             return False
 
         # Determine the mode
@@ -968,7 +1026,7 @@ class Characteristic:
             mode = 1 if notify else 0
         else:
             print("Invalid parameter for notify. Must be True, False, or 'indicate'.")
-            self.characteristic_enable_notifications_failed("Invalid parameter for notify.")
+            self.characteristic_enable_notifications_failed(self, "Invalid parameter for notify.")
             return False
 
         # If disabling notifications/indications
@@ -982,17 +1040,17 @@ class Characteristic:
         current_time = int(time.time())
 
         set_attribute_command = {
-            "mac": self.service.device.manager.gateway_mac,
+            "mac": device.manager.gateway_mac,
             "type": "cmd",
             "time": current_time,
             "from": "CLOUD",
-            "deviceCode": self.service.device.manager.device_code if self.service.device.manager.device_code else "00000000-0000-0000-0000-000000000000",
+            "deviceCode": device.manager.device_code if device.manager.device_code else "00000000-0000-0000-0000-000000000000",
             "data": {
                 "command": "setAttribute",
                 "arguments": {
-                    "mac": self.service.device.mac_address,
+                    "mac": device.mac_address,
                     "value": {
-                        "mac": self.service.device.mac_address,
+                        "mac": device.mac_address,
                         "service": self.service.uuid,
                         "mode": mode,
                         "characteristic": self.uuid,
@@ -1008,29 +1066,29 @@ class Characteristic:
 
         try:
             # Send the setAttribute command
-            self.service.device.manager.send_command(set_attribute_command, command_id_with_newline)
+            device.manager.send_command(set_attribute_command, command_id, command_type="notify", characteristic=self)
             print(f"Sent setAttribute command with ID: {command_id} to set notifications mode: {mode}")
 
             # Wait for cmdResult
-            cmd_result = self.service.device.manager.wait_for_cmd_result(command_id, timeout=timeout)
+            cmd_result = device.manager.wait_for_cmd_result(command_id, timeout=timeout)
             if not cmd_result:
                 print(f"Timeout waiting for cmdResult of setAttribute command ID: {command_id}")
-                self.characteristic_enable_notifications_failed("Timeout waiting for cmdResult")
+                self.characteristic_enable_notifications_failed(self, "Timeout waiting for cmdResult")
                 return False
 
             cmd_code = cmd_result.get('data', {}).get('code', -1)
             if cmd_code != 0:
                 print(f"setAttribute command failed with code: {cmd_code}")
-                self.characteristic_enable_notifications_failed(f"Command failed with code: {cmd_code}")
+                self.characteristic_enable_notifications_failed(self, f"Command failed with code: {cmd_code}")
                 return False
 
             print(f"setAttribute command succeeded for command ID: {command_id}")
-            self.characteristic_enable_notifications_succeeded()
+            self.characteristic_enable_notifications_succeeded(self)
             return True
 
         except Exception as e:
             print(f"Exception during enable_notifications: {e}")
-            self.characteristic_enable_notifications_failed(str(e))
+            self.characteristic_enable_notifications_failed(self, str(e))
             return False
 
     def characteristic_value_updated(self, value):
@@ -1051,7 +1109,7 @@ class Characteristic:
         """
         print(f"Failed to read value from Characteristic {self.uuid}: {error}")
 
-    def characteristic_write_value_succeeded(self):
+    def characteristic_write_value_succeeded(self, characteristic):
         """
         Handles a successful write operation.
         """
@@ -1065,13 +1123,13 @@ class Characteristic:
         """
         print(f"Failed to write value to Characteristic {self.uuid}: {error}")
 
-    def characteristic_enable_notifications_succeeded(self):
+    def characteristic_enable_notifications_succeeded(self, characteristic):
         """
         Handles successful notification/indication configuration.
         """
         print(f"Successfully configured notifications/indications for Characteristic {self.uuid}.")
 
-    def characteristic_enable_notifications_failed(self, error):
+    def characteristic_enable_notifications_failed(self, characteristic, error):
         """
         Handles failed notification/indication configuration.
 
