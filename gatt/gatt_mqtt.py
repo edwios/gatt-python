@@ -176,9 +176,10 @@ class DeviceManager:
                         print(f"Received cmdResult for command ID: {cmd_id_raw}")
             # Handle reportAttribute messages
             elif message_type == 'reportAttribute':
-                print(f'Handling {message_type}')
                 attribute = data.get('data', {}).get('attribute', '').strip()
                 target_mac = data.get('data', {}).get('mac', '').strip()
+                # if (attribute != "BLE_connect_status"):
+                #    print(f'Handling {message_type} of {attribute} from {target_mac}')
                 if attribute == "mod.ble.connected":
                     print(f"Received connected event for MAC: {target_mac}")
                     device = self._devices.get(target_mac)
@@ -676,28 +677,37 @@ class Device:
             return
 
         cmd_code = cmd_result.get('data', {}).get('code', -1)
-        if cmd_code != 0:
-            self.connect_failed(f"Gateway returned error code: {cmd_code}")
+        if cmd_code == 0:
+            print(f"getAttribute command succeeded with code 0 for device {self.mac_address}.")
+        elif cmd_code == 99:
+            print(f"Gateway is processing connection for device {self.mac_address} with code 99. Waiting for connection confirmation.")
+            # Wait for "mod.ble.connected" event
+            if not self.connected_event.wait(timeout=30):
+                self.connect_failed("Connection timeout after receiving code 99")
+                return
+            else:
+                print(f"Device {self.mac_address} connected after code 99.")
+        else:
+            # For any other non-99 code, treat as error
+            self.connect_failed(f"Gateway returned non-99 error code: {cmd_code}")
             return
 
-        print(f"getAttribute command accepted by gateway for device {self.mac_address}.")
+        # Wait for reportAttribute only if services are not yet resolved
+        if not self._is_services_resolved:
+            report_attribute = self.manager.wait_for_report_attribute(command_id, timeout=30)
+            if not report_attribute:
+                self.connect_failed("No reportAttribute received.")
+                return
 
-        # Wait for reportAttribute
-        report_attribute = self.manager.wait_for_report_attribute(command_id, timeout=30)
-        if not report_attribute:
-            self.connect_failed("No reportAttribute received.")
-            return
-
-        # Extract services and characteristics
-        try:
-            services_data = report_attribute.get('data', {}).get('value', {}).get('services', [])
-            self._parse_services(services_data)
-            self._is_services_resolved = True
-            self._is_connected = True
-            self.connect_succeeded()
-            print(f"Services and characteristics resolved for device {self.mac_address}.")
-        except Exception as e:
-            self.connect_failed(f"Failed to parse services: {e}")
+            # Extract services and characteristics
+            try:
+                services_data = report_attribute.get('data', {}).get('value', {}).get('services', [])
+                self._parse_services(services_data)
+                self._is_services_resolved = True
+                self.connect_succeeded()
+                print(f"Services and characteristics resolved for device {self.mac_address}.")
+            except Exception as e:
+                self.connect_failed(f"Failed to parse services: {e}")
 
     def _parse_services(self, services_data):
         """
@@ -878,32 +888,44 @@ class Characteristic:
                 return None
 
             cmd_code = cmd_result.get('data', {}).get('code', -1)
-            if cmd_code != 0:
+            if cmd_code == 0:
+                print(f"getAttribute command succeeded with code 0 for Characteristic {self.uuid}")
+            elif cmd_code == 99:
+                print(f"Gateway is processing connection for Characteristic {self.uuid} with code 99. Waiting for connection confirmation.")
+                # Wait for "mod.ble.connected" event
+                if not device.connected_event.wait(timeout=20):
+                    print(f"Device {device.mac_address} not connected within timeout after code 99. Cannot read Characteristic {self.uuid}.")
+                    device.connect_failed("Connection timeout after receiving code 99 during read operation")
+                    self.characteristic_read_value_failed("Connection timeout after receiving code 99 during read operation")
+                    return None
+                else:
+                    print(f"Device {device.mac_address} connected after code 99 for read operation.")
+            else:
+                # For any other non-99 code, treat as error
                 print(f"getAttribute command failed with code: {cmd_code}")
                 self.characteristic_read_value_failed(f"Command failed with code: {cmd_code}")
                 return None
 
-            print(f"getAttribute command accepted for command ID: {command_id}")
+            # Wait for reportAttribute only if services are not yet resolved
+            if not self.service.is_services_resolved():
+                report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
+                if not report_attribute:
+                    print(f"Timeout waiting for reportAttribute of getAttribute command ID: {command_id}")
+                    self.characteristic_read_value_failed("Timeout waiting for reportAttribute")
+                    return None
 
-            # Wait for reportAttribute
-            report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
-            if not report_attribute:
-                print(f"Timeout waiting for reportAttribute of getAttribute command ID: {command_id}")
-                self.characteristic_read_value_failed("Timeout waiting for reportAttribute")
-                return None
+                # Extract the characteristic value
+                data = report_attribute.get('data', {}).get('value', {})
+                if data.get('service') != self.service.uuid or data.get('characteristic') != self.uuid:
+                    print("Received reportAttribute does not match the requested service and characteristic UUIDs.")
+                    self.characteristic_read_value_failed("Mismatched service or characteristic UUIDs")
+                    return None
 
-            # Extract the characteristic value
-            data = report_attribute.get('data', {}).get('value', {})
-            if data.get('service') != self.service.uuid or data.get('characteristic') != self.uuid:
-                print("Received reportAttribute does not match the requested service and characteristic UUIDs.")
-                self.characteristic_read_value_failed("Mismatched service or characteristic UUIDs")
-                return None
-
-            char_data = data.get('data', '')
-            self.value = char_data
-            self.hexvalue = char_data  # Assuming the data is already in hex string format
-            print(f"Read value from Characteristic {self.uuid}: {self.hexvalue}")
-            return self.hexvalue
+                char_data = data.get('data', '')
+                self.value = char_data
+                self.hexvalue = char_data  # Assuming the data is already in hex string format
+                print(f"Read value from Characteristic {self.uuid}: {self.hexvalue}")
+                return self.hexvalue
 
         except Exception as e:
             print(f"Exception during read_value: {e}")
@@ -980,14 +1002,43 @@ class Characteristic:
                 return False
 
             cmd_code = cmd_result.get('data', {}).get('code', -1)
-            if cmd_code != 0:
+            if cmd_code == 0:
+                print(f"setAttribute command succeeded with code 0 for Characteristic {self.uuid}")
+            elif cmd_code == 99:
+                print(f"Gateway is processing connection for Characteristic {self.uuid} with code 99. Waiting for connection confirmation.")
+                # Wait for "mod.ble.connected" event
+                if not device.connected_event.wait(timeout=20):
+                    print(f"Device {device.mac_address} not connected within timeout after code 99. Cannot write Characteristic {self.uuid}.")
+                    device.connect_failed("Connection timeout after receiving code 99 during write operation")
+                    self.characteristic_write_value_failed("Connection timeout after receiving code 99 during write operation")
+                    return False
+                else:
+                    print(f"Device {device.mac_address} connected after code 99 for write operation.")
+            else:
+                # For any other non-99 code, treat as error
                 print(f"setAttribute command failed with code: {cmd_code}")
                 self.characteristic_write_value_failed(f"Command failed with code: {cmd_code}")
                 return False
 
-            print(f"setAttribute command succeeded for command ID: {command_id}")
+            # Wait for reportAttribute only if services are not yet resolved
+            if not self.service.is_services_resolved():
+                report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
+                if not report_attribute:
+                    print(f"Timeout waiting for reportAttribute of setAttribute command ID: {command_id}")
+                    self.characteristic_write_value_failed("Timeout waiting for reportAttribute")
+                    return False
+
+                # Assuming setAttribute does not return data, so just mark success
+                self.value = value
+                self.hexvalue = value
+                print(f"Wrote value to Characteristic {self.uuid}: {self.hexvalue}")
+                self.characteristic_write_value_succeeded(self)
+                return True
+
+            # If services are already resolved, assume write was successful
             self.value = value
             self.hexvalue = value
+            print(f"Wrote value to Characteristic {self.uuid}: {self.hexvalue}")
             self.characteristic_write_value_succeeded(self)
             return True
 
@@ -1077,12 +1128,37 @@ class Characteristic:
                 return False
 
             cmd_code = cmd_result.get('data', {}).get('code', -1)
-            if cmd_code != 0:
+            if cmd_code == 0:
+                print(f"setAttribute command succeeded with code 0 for Characteristic {self.uuid}")
+            elif cmd_code == 99:
+                print(f"Gateway is processing connection for Characteristic {self.uuid} with code 99. Waiting for connection confirmation.")
+                # Wait for "mod.ble.connected" event
+                if not device.connected_event.wait(timeout=20):
+                    print(f"Device {device.mac_address} not connected within timeout after code 99. Cannot configure notifications/indications for Characteristic {self.uuid}.")
+                    device.connect_failed("Connection timeout after receiving code 99 during configure notifications/indications")
+                    self.characteristic_enable_notifications_failed(self, "Connection timeout after receiving code 99 during configure notifications/indications")
+                    return False
+                else:
+                    print(f"Device {device.mac_address} connected after code 99 for configure notifications/indications.")
+            else:
+                # For any other non-99 code, treat as error
                 print(f"setAttribute command failed with code: {cmd_code}")
                 self.characteristic_enable_notifications_failed(self, f"Command failed with code: {cmd_code}")
                 return False
 
-            print(f"setAttribute command succeeded for command ID: {command_id}")
+            # Wait for reportAttribute only if services are not yet resolved
+            if not self.service.is_services_resolved():
+                report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
+                if not report_attribute:
+                    print(f"Timeout waiting for reportAttribute of setAttribute command ID: {command_id}")
+                    self.characteristic_enable_notifications_failed(self, "Timeout waiting for reportAttribute")
+                    return False
+
+                # Assuming setAttribute does not return data, so just mark success
+                self.characteristic_enable_notifications_succeeded(self)
+                return True
+
+            # If services are already resolved, assume configuration was successful
             self.characteristic_enable_notifications_succeeded(self)
             return True
 
