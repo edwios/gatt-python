@@ -28,21 +28,12 @@ class FirmwareDevice(Device):
                 print(f"Custom firmware characteristic UUID {custom_uuid} not found for device {self.mac_address}.")
                 return
 
-        # Read the firmware version
-        print(f"Reading firmware version from Characteristic UUID {firmware_char.uuid} for device {self.mac_address}.")
-        firmware_value = firmware_char.read_value()
+        # Store the firmware_char for reference in characteristic_value_updated()
+        self.firmware_char = firmware_char
 
-        if firmware_value:
-            # Assuming the firmware version is a UTF-8 encoded string
-            try:
-                firmware_version = bytes.fromhex(firmware_value).decode('utf-8')
-                print(f"Device {self.mac_address} Firmware Version: {firmware_version}")
-            except ValueError:
-                print(f"Device {self.mac_address} Firmware Version (hex): {firmware_value}")
-            except UnicodeDecodeError:
-                print(f"Device {self.mac_address} Firmware Version (decoded error): {firmware_value}")
-        else:
-            print(f"Device {self.mac_address} Firmware Version: No data received.")
+        # Read the firmware version without handling the return value
+        print(f"Reading firmware version from Characteristic UUID {firmware_char.uuid} for device {self.mac_address}.")
+        firmware_char.read_value()
 
     def find_characteristic(self, target_uuid):
         """
@@ -58,11 +49,26 @@ class FirmwareDevice(Device):
         return None
 
     # The following methods are not used in firmware retrieval but must be implemented
-    def characteristic_value_updated(self, value):
+    def characteristic_value_updated(self, uuid, value):
         """
-        This method is not used for synchronous read operations.
+        Handles the updated value of a characteristic.
+        Prints the firmware version if this characteristic is the firmware characteristic.
+
+        :param uuid: UUID of the characteristic that was updated.
+        :param value: The new value of the characteristic as a hexadecimal string.
         """
-        pass
+        # Check if the updated characteristic is the firmware characteristic
+        if hasattr(self, 'firmware_char') and self.firmware_char and self.firmware_char.uuid.lower() == uuid.lower():
+            try:
+                # Decode the hexadecimal string to get the firmware version
+                firmware_version = bytes.fromhex(value).decode('utf-8')
+                print(f"***** Device {self.mac_address} Firmware Version: {firmware_version}")
+            except ValueError:
+                print(f"Device {self.mac_address} Firmware Version (hex): {value}")
+            except UnicodeDecodeError:
+                print(f"Device {self.mac_address} Firmware Version (decoded error): {value}")
+        else:
+            print(f"Characteristic {uuid} value updated for device {self.mac_address}: {value}")
 
     def characteristic_read_value_failed(self, error):
         """
@@ -138,7 +144,7 @@ def main():
             # Ensure the device is connected
             if not device.is_connected():
                 print(f"Device {device.mac_address} is not connected. Attempting to connect...")
-                if device.rssi > -60:
+                if device.rssi < -70:
                     print(f'Device {device.mac_address} is too far away (rssi: {device.rssi})')
                 else:
                     device.connect()  # Initiates connection; connection status is managed internally

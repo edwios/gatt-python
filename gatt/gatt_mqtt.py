@@ -864,11 +864,10 @@ class Characteristic:
         Reads the value of this characteristic.
 
         :param timeout: Timeout in seconds for waiting for the response.
-        :return: The value of the characteristic in hexadecimal string if successful, else None.
         """
         if "read" not in self.properties.lower():
             print(f"Characteristic {self.uuid} does not have read property.")
-            return None
+            return  # Optionally, you can remove this line if you want to avoid returning anything.
 
         device = self.service.device
         print(f"Attempting to read Characteristic {self.uuid} on device {device.mac_address}")
@@ -878,10 +877,9 @@ class Characteristic:
             print(f"Device {device.mac_address} not connected within timeout. Cannot read Characteristic {self.uuid}.")
             device.connect_failed("Connection timeout before read operation")
             self.characteristic_read_value_failed("Connection timeout before read operation")
-            return None
+            return  # Optionally, remove this line.
 
         command_id = str(uuid.uuid4())
-        command_id_with_newline = f"{command_id}\u000a"
         current_time = int(time.time())
 
         get_attribute_command = {
@@ -903,7 +901,7 @@ class Characteristic:
                     "attribute": "mod.ble.attr.get",
                     "ep": 1
                 },
-                "id": command_id_with_newline
+                "id": command_id
             },
             "to": "BLE"
         }
@@ -918,7 +916,7 @@ class Characteristic:
             if not cmd_result:
                 print(f"Timeout waiting for cmdResult of getAttribute command ID: {command_id}")
                 self.characteristic_read_value_failed("Timeout waiting for cmdResult")
-                return None
+                return  # Removed 'return None'
 
             cmd_code = cmd_result.get('data', {}).get('code', -1)
             if cmd_code == 0:
@@ -930,40 +928,41 @@ class Characteristic:
                     print(f"Device {device.mac_address} not connected within timeout after code 99. Cannot read Characteristic {self.uuid}.")
                     device.connect_failed("Connection timeout after receiving code 99 during read operation")
                     self.characteristic_read_value_failed("Connection timeout after receiving code 99 during read operation")
-                    return None
+                    return  # Removed 'return None'
                 else:
                     print(f"Device {device.mac_address} connected after code 99 for read operation.")
             else:
                 # For any other non-99 code, treat as error
                 print(f"getAttribute command failed with code: {cmd_code}")
                 self.characteristic_read_value_failed(f"Command failed with code: {cmd_code}")
-                return None
+                return  # Removed 'return None'
 
-            # Wait for reportAttribute only if services are not yet resolved
+            # Wait for reportAttribute only if services are resolved
             if self.service.device.is_services_resolved():
                 report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
                 if not report_attribute:
                     print(f"Timeout waiting for reportAttribute of getAttribute command ID: {command_id}")
                     self.characteristic_read_value_failed("Timeout waiting for reportAttribute")
-                    return None
+                    return  # Removed 'return None'
 
                 # Extract the characteristic value
                 data = report_attribute.get('data', {}).get('value', {})
                 if data.get('service') != self.service.uuid or data.get('characteristic') != self.uuid:
                     print("Received reportAttribute does not match the requested service and characteristic UUIDs.")
                     self.characteristic_read_value_failed("Mismatched service or characteristic UUIDs")
-                    return None
+                    return  # Removed 'return None'
 
-                char_data = data.get('data', '')
-                self.value = char_data
-                self.hexvalue = char_data  # Assuming the data is already in hex string format
-                print(f"Read value from Characteristic {self.uuid}: {self.hexvalue}")
-                return self.hexvalue
+                # Removed the following lines:
+                # char_data = data.get('data', '')
+                # self.value = char_data
+                # self.hexvalue = char_data  # Assuming the data is already in hex string format
+                # print(f"Read value from Characteristic {self.uuid}: {self.hexvalue}")
+                # return self.hexvalue
 
         except Exception as e:
             print(f"Exception during read_value: {e}")
             self.characteristic_read_value_failed(str(e))
-            return None
+            return  # Removed 'return None'
 
     def write_value(self, value, timeout=30):
         """
@@ -1209,6 +1208,8 @@ class Characteristic:
         self.value = value
         self.hexvalue = value
         print(f"Characteristic {self.uuid} value updated via notification/indication: {self.hexvalue}")
+        # Delegate the handling to the parent Device
+        self.service.device.characteristic_value_updated(self.uuid, value)  # Added line
 
     def characteristic_read_value_failed(self, error):
         """
@@ -1223,6 +1224,7 @@ class Characteristic:
         Handles a successful write operation.
         """
         print(f"Successfully wrote value to Characteristic {self.uuid}.")
+        self.service.device.characteristic_write_value_succeeded(self)  # Added line
 
     def characteristic_write_value_failed(self, error):
         """
@@ -1231,12 +1233,14 @@ class Characteristic:
         :param error: The error message or code.
         """
         print(f"Failed to write value to Characteristic {self.uuid}: {error}")
+        self.service.device.characteristic_write_value_failed(self, error)  # Added line
 
     def characteristic_enable_notifications_succeeded(self, characteristic):
         """
         Handles successful notification/indication configuration.
         """
         print(f"Successfully configured notifications/indications for Characteristic {self.uuid}.")
+        self.service.device.characteristic_enable_notifications_succeeded(self)  # Added line
 
     def characteristic_enable_notifications_failed(self, characteristic, error):
         """
@@ -1245,6 +1249,7 @@ class Characteristic:
         :param error: The error message or code.
         """
         print(f"Failed to configure notifications/indications for Characteristic {self.uuid}: {error}")
+        self.service.device.characteristic_enable_notifications_failed(self, error)
 
 
 def _error_from_mqtt_error(e):
