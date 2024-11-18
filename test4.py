@@ -112,7 +112,7 @@ def main():
     )
 
     # Start discovery for devices named "TelldusFlow"
-    target_device_names = ["TelldusFlow"]  # Replace with your target device names
+    target_device_names = ["TelldusFlow", "BLE Mesh", "BLE MESH"]  # Replace with your target device names
     device_manager.start_discovery(dev_names=target_device_names)
 
     # Run the DeviceManager in a separate thread
@@ -121,13 +121,16 @@ def main():
 
     # Allow some time for device discovery
     discovery_timeout = 40  # seconds
-    print(f"Waiting for {discovery_timeout} seconds to discover devices...")
-    time.sleep(discovery_timeout)
+    devices = {}
+    while not devices:
+        print(f"Waiting for {discovery_timeout} seconds to discover devices...")
+        time.sleep(discovery_timeout)
 
-    # Iterate through all discovered devices and retrieve firmware versions
-    devices = device_manager.devices()
+        # Iterate through all discovered devices and retrieve firmware versions
+        devices = device_manager.devices()
+        print("No devices discovered. Retrying...")
     if not devices:
-        print("No devices discovered.")
+        print("No devices discovered. We are done.")
     else:
         print(f"Discovered {len(devices)} device(s). Retrieving firmware versions...")
         for device in devices:
@@ -135,11 +138,14 @@ def main():
             # Ensure the device is connected
             if not device.is_connected():
                 print(f"Device {device.mac_address} is not connected. Attempting to connect...")
-                device.connect()  # Initiates connection; connection status is managed internally
-                # Wait for connection to be established
-                if not device.connected_event.wait(timeout=10):
-                    print(f"Failed to connect to device {device.mac_address} within timeout.")
-                    continue  # Skip to the next device
+                if device.rssi > -60:
+                    print(f'Device {device.mac_address} is too far away (rssi: {device.rssi})')
+                else:
+                    device.connect()  # Initiates connection; connection status is managed internally
+                    # Wait for connection to be established
+                    if not device.connected_event.wait(timeout=10):
+                        print(f"Failed to connect to device {device.mac_address} within timeout.")
+                        continue  # Skip to the next device
 
             # Retrieve firmware version
             device.retrieve_firmware_version()
