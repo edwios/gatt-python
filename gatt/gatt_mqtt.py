@@ -191,6 +191,34 @@ class DeviceManager:
                     print(f"Received disconnected event for MAC: {target_mac}")
                     device = self._devices.get(target_mac)
                     if device:
+                        # Extract 'reason' and 'rssi' from the message
+                        value = data.get('data', {}).get('value', {})
+                        reason = value.get('reason', None)
+                        # Handle 'reason'
+                        if reason is not None:
+                            try:
+                                # If 'reason' is an integer, convert to hex
+                                if isinstance(reason, int):
+                                    reason_hex = hex(reason)
+                                elif isinstance(reason, str):
+                                    # Attempt to interpret the string as hex
+                                    reason_hex = reason.encode('utf-8').hex()
+                                else:
+                                    reason_hex = str(reason)
+                            except Exception as e:
+                                reason_hex = f"Error converting reason to hex: {e}"
+                        else:
+                            reason_hex = "Not provided."
+
+                        # Handle 'rssi'
+                        scan_rssi = device.rssi if device.rssi is not None else "Not available"
+
+                        # Print the extracted information
+                        print(f"Device {target_mac} disconnected.")
+                        print(f"Reason (hex): {reason_hex}")
+                        print(f"RSSI: {scan_rssi}")
+
+                        # Invoke the disconnect succeeded method
                         device.disconnect_succeeded()
                     else:
                         print(f"No device found with MAC: {target_mac} for disconnected event.")
@@ -215,30 +243,41 @@ class DeviceManager:
                                 if characteristic:
                                     characteristic.characteristic_value_updated(characteristic_data)
                                 break
+                elif attribute == "mod.device_list":
+                    print("Handling mod.device_list reportAttribute.")
+                    # Process device discovery as before
+                    device_list = data.get('data', {}).get('value', {}).get('device_list', [])
+
+                    if self._discovery_active and self._dev_names:
+                        for device_info in device_list:
+                            dev_name = device_info.get('dev_name', '')
+                            if dev_name in self._dev_names:
+                                # Prefer 'ble_addr' over 'mac' if available
+                                mac = device_info.get('ble_addr') or device_info.get('mac')
+                                scan_rssi = device_info.get('scan_rssi', None)
+                                if mac:
+                                    if mac not in self._devices:
+                                        device = self.make_device(mac)
+                                        if device:
+                                            self._devices[mac] = device
+                                            device.rssi = scan_rssi
+                                            print(f"Discovered device named {dev_name} with MAC: {mac} and RSSI: {scan_rssi}")
+
+                                    # Update device attributes if necessary
+                                    # self._devices[mac].update_attributes(device_info)
+                    else:
+                        # Discovery is not active; ignore incoming device information
+                        pass
+                elif attribute == "mod.ble.inspect":
+                    print(f"Handling {attribute} reportAttribute.")
+                    # Process device inspect results
+                    # Implement the logic to handle mod.ble.inspect reportAttribute as needed
+                    
                 else:
                     # Other reportAttribute messages can be handled here
                     pass
 
-                # Process device discovery as before
-                device_list = data.get('data', {}).get('value', {}).get('device_list', [])
 
-                if self._discovery_active and self._dev_names:
-                    for device_info in device_list:
-                        dev_name = device_info.get('dev_name', '')
-                        if dev_name in self._dev_names:
-                            # Prefer 'ble_addr' over 'mac' if available
-                            mac = device_info.get('ble_addr') or device_info.get('mac')
-                            if mac:
-                                if mac not in self._devices:
-                                    device = self.make_device(mac)
-                                    if device:
-                                        self._devices[mac] = device
-                                        print(f"Discovered device named {dev_name} with MAC: {mac}")
-                                # Update device attributes if necessary
-                                # self._devices[mac].update_attributes(device_info)
-                else:
-                    # Discovery is not active; ignore incoming device information
-                    pass
 
             else:
                 # Other message types can be handled here
@@ -500,6 +539,7 @@ class Device:
         self.alias = None  # Assuming alias attribute exists
         self.services = []
         self.connected_event = threading.Event()  # Event to manage connection status
+        self.rssi = None  # Initialize RSSI attribute
 
     def advertised(self):
         """
