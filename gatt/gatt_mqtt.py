@@ -45,6 +45,7 @@ class DeviceManager:
 
         self._devices = {}
         self._dev_names = set()
+        self._inspect_pending_devices = set()  # Set of MAC addresses awaiting mod.ble.inspect reportAttribute
         self._discovery_active = False
 
         self._stop_event = threading.Event()
@@ -167,19 +168,28 @@ class DeviceManager:
             if message_type == 'cmdResult':
                 print(f'Handling {message_type}')
                 cmd_id_raw = data.get('data', {}).get('id', '').strip()
-                # print(f'id {cmd_id_raw} with Pending commands')
+                cmd_code = data.get('data', {}).get('code', -1)
+
                 with self._commands_lock:
                     command_entry = self._pending_commands.get(cmd_id_raw)
                     if command_entry:
                         command_entry['response'] = data
                         command_entry['event'].set()
-                        print(f"Received cmdResult for command ID: {cmd_id_raw}")
+                        print(f"Received cmdResult for command ID: {cmd_id_raw} with code: {cmd_code}")
+
+                        # Check if this cmdResult is for a mod.ble.inspect command
+                        if command_entry['command_type'] == "inspect" and cmd_code == 0:
+                            # Add the device to the inspect pending set
+                            target_mac = data.get('data', {}).get('arguments', {}).get('mac', '').strip()
+                            if target_mac:
+                                self._inspect_pending_devices.add(target_mac)
+                                print(f"Device {target_mac} is pending mod.ble.inspect reportAttribute.")
+
             # Handle reportAttribute messages
             elif message_type == 'reportAttribute':
                 attribute = data.get('data', {}).get('attribute', '').strip()
                 target_mac = data.get('data', {}).get('mac', '').strip()
-                # if (attribute != "BLE_connect_status"):
-                #    print(f'Handling {message_type} of {attribute} from {target_mac}')
+
                 if attribute == "mod.ble.connected":
                     print(f"Received connected event for MAC: {target_mac}")
                     device = self._devices.get(target_mac)
@@ -187,6 +197,7 @@ class DeviceManager:
                         device.connect_succeeded()
                     else:
                         print(f"No device found with MAC: {target_mac} for connected event.")
+
                 elif attribute == "mod.ble.disconnected":
                     print(f"Received disconnected event for MAC: {target_mac}")
                     device = self._devices.get(target_mac)
@@ -222,6 +233,7 @@ class DeviceManager:
                         device.disconnect_succeeded()
                     else:
                         print(f"No device found with MAC: {target_mac} for disconnected event.")
+
                 elif attribute == "mod.ble.attr":
                     # Existing handling for mod.ble.attr
                     service_uuid = data.get('data', {}).get('value', {}).get('service', '')
@@ -243,6 +255,7 @@ class DeviceManager:
                                 if characteristic:
                                     characteristic.characteristic_value_updated(characteristic_data)
                                 break
+
                 elif attribute == "mod.device_list":
                     print("Handling mod.device_list reportAttribute.")
                     # Process device discovery as before
@@ -268,16 +281,34 @@ class DeviceManager:
                     else:
                         # Discovery is not active; ignore incoming device information
                         pass
+
                 elif attribute == "mod.ble.inspect":
                     print(f"Handling {attribute} reportAttribute.")
-                    # Process device inspect results
-                    # Implement the logic to handle mod.ble.inspect reportAttribute as needed
-                    
+                    # Process mod.ble.inspect reportAttribute
+                    # Extract 'deviceCode' from the top-level of the message
+                    gateway_uuid = data.get('deviceCode', '').strip()
+                    mac = data.get('data', {}).get('mac', '').strip()
+
+                    # Verify that the device is in the pending inspect set
+                    if mac in self._inspect_pending_devices:
+                        device = self._devices.get(mac)
+                        if device:
+                            if gateway_uuid == self.device_code:
+                                device.services_resolved(data)
+                                print(f"Processed mod.ble.inspect for device {mac}.")
+                            else:
+                                print(f"Gateway UUID mismatch for device {mac}: expected {self.device_code}, got {gateway_uuid}")
+                        else:
+                            print(f"No device found with MAC: {mac} for mod.ble.inspect reportAttribute.")
+
+                        # Remove the device from the pending set regardless of UUID match
+                        self._inspect_pending_devices.discard(mac)
+                    else:
+                        print(f"Received mod.ble.inspect reportAttribute for device {mac}, which is not pending inspection.")
+
                 else:
                     # Other reportAttribute messages can be handled here
                     pass
-
-
 
             else:
                 # Other message types can be handled here
@@ -311,6 +342,13 @@ class DeviceManager:
                     'service_uuid': self._get_service_uuid(characteristic),
                     'characteristic_uuid': self._get_characteristic_uuid(characteristic)
                 }
+
+                # If the command is of type 'inspect', track the device's MAC
+                if command_type == "inspect":
+                    target_mac = command_json.get('data', {}).get('arguments', {}).get('mac', '').strip()
+                    if target_mac:
+                        self._inspect_pending_devices.add(target_mac)
+                        print(f"Device {target_mac} is pending mod.ble.inspect reportAttribute.")
             finally:
                 print("Released acquired lock at send_command")
 
@@ -533,7 +571,6 @@ class Device:
     def __init__(self, mac_address, manager):
         self.mac_address = mac_address
         self.manager = manager
-        self._connect_retry_attempt = 0
         self._is_services_resolved = False
         self._is_connected = False
         self.alias = None  # Assuming alias attribute exists
@@ -547,7 +584,6 @@ class Device:
         Initiates connection to resolve services.
         """
         print(f"Device {self.mac_address} advertised.")
-        self.connect()
 
     def invalidate(self):
         """
@@ -558,20 +594,90 @@ class Device:
 
     def connect(self):
         """
-        Refresh device services and characteristics.
+        Initiates connection by sending mod.ble.inspect command.
         """
         print(f"Connecting to device {self.mac_address}...")
-        self.services_resolved()
+        self.send_inspect_command()
 
-    def _connect(self):
-        self._connect_retry_attempt += 1
-        # Implement actual connection logic here
-        pass
+    def send_inspect_command(self):
+        """
+        Sends the mod.ble.inspect command to the MQTT broker to inspect the device.
+        """
+        command_id = str(uuid.uuid4())
+        current_time = int(time.time())
+
+        inspect_command = {
+            "mac": self.manager.gateway_mac,
+            "type": "cmd",
+            "time": current_time,
+            "from": "CLOUD",
+            "deviceCode": self.manager.device_code if self.manager.device_code else "00000000-0000-0000-0000-000000000000",
+            "data": {
+                "command": "getAttribute",
+                "arguments": {
+                    "mac": self.mac_address,
+                    "value": {
+                        "mac": self.mac_address,
+                    },
+                    "attribute": "mod.ble.inspect",
+                    "ep": 1
+                },
+                "id": f"{command_id}"
+            },
+            "to": "BLE"
+        }
+
+        print(f"Sending mod.ble.inspect command to device {self.mac_address} with command ID: {command_id}")
+        self.manager.send_command(inspect_command, command_id, command_type="inspect", characteristic=None)
+
+    def services_resolved(self, report_attribute_data):
+        """
+        Processes the mod.ble.inspect reportAttribute data to resolve services and characteristics.
+
+        :param report_attribute_data: The JSON data from the reportAttribute message.
+        """
+        try:
+            services_data = report_attribute_data.get('data', {}).get('value', {}).get('services', [])
+            if not services_data:
+                raise ValueError("No services data found in mod.ble.inspect reportAttribute.")
+
+            self._parse_services(services_data)
+            self._is_services_resolved = True
+            self.connect_succeeded()
+            print(f"Services and characteristics resolved for device {self.mac_address}.")
+        except Exception as e:
+            self.connect_failed(f"Failed to parse services: {e}")
+
+    def _parse_services(self, services_data):
+        """
+        Parses the services and characteristics data and populates the services list.
+
+        :param services_data: List of services data from MQTT.
+        """
+        self.services = []
+        for service_info in services_data:
+            service = Service(
+                device=self,
+                uuid=service_info.get('uuid', ''),
+                servicename=service_info.get('servicename', '')
+            )
+            characteristics_data = service_info.get('characteristics', [])
+            for char_info in characteristics_data:
+                characteristic = Characteristic(
+                    service=service,
+                    uuid=char_info.get('uuid', ''),
+                    handle=char_info.get('handle', 0),
+                    properties=char_info.get('properties', ''),
+                    length=char_info.get('len', 0),
+                    value=char_info.get('value', ''),
+                    hexvalue=char_info.get('hexvalue', '')
+                )
+                service.characteristics.append(characteristic)
+            self.services.append(service)
 
     def connect_succeeded(self):
         """
-        Will be called when `connect()` has finished connecting to the device.
-        Will not be called if the device was already connected.
+        Called when the device has successfully connected and services are resolved.
         """
         if not self._is_connected:
             self._is_connected = True
@@ -600,14 +706,14 @@ class Device:
 
     def disconnect_succeeded(self):
         """
-        Will be called when the device has disconnected.
+        Called when the device has disconnected successfully.
         """
         self.services = []
         print(f"Device {self.mac_address} disconnected successfully.")
 
     def is_connected(self):
         """
-        Returns `True` if the device was refreshed successfully, otherwise `False`.
+        Returns `True` if the device is connected, otherwise `False`.
         """
         return self._is_connected
 
@@ -617,164 +723,51 @@ class Device:
         """
         return self._is_services_resolved
 
-    def properties_changed(self, sender, changed_properties, invalidated_properties):
-        """
-        Called when a device property has changed or got invalidated.
-        """
-        pass
-
     def characteristic_value_updated(self, value):
         """
-        Called when a characteristic value has changed.
+        Updates the characteristic value when a notification or indication is received.
+
+        :param value: The new value of the characteristic as a hexadecimal string.
         """
-        # To be implemented by subclass
-        pass
+        self.value = value
+        self.hexvalue = value
+        print(f"Characteristic {self.uuid} value updated via notification/indication: {self.hexvalue}")
 
     def characteristic_read_value_failed(self, error):
         """
-        Called when a characteristic value read command failed.
+        Handles a failed read operation.
+
+        :param error: The error message or code.
         """
-        # To be implemented by subclass
-        pass
+        print(f"Failed to read value from Characteristic {self.uuid}: {error}")
 
     def characteristic_write_value_succeeded(self, characteristic):
         """
-        Called when a characteristic value write command succeeded.
+        Handles a successful write operation.
         """
-        # To be implemented by subclass
-        pass
+        print(f"Successfully wrote value to Characteristic {self.uuid}.")
 
-    def characteristic_write_value_failed(self, characteristic, error):
+    def characteristic_write_value_failed(self, error):
         """
-        Called when a characteristic value write command failed.
+        Handles a failed write operation.
+
+        :param error: The error message or code.
         """
-        # To be implemented by subclass
-        pass
+        print(f"Failed to write value to Characteristic {self.uuid}: {error}")
 
     def characteristic_enable_notifications_succeeded(self, characteristic):
         """
-        Called when a characteristic notifications enable command succeeded.
+        Handles successful notification/indication configuration.
         """
-        # To be implemented by subclass
-        pass
+        print(f"Successfully configured notifications/indications for Characteristic {self.uuid}.")
 
     def characteristic_enable_notifications_failed(self, characteristic, error):
         """
-        Called when a characteristic notifications enable command failed.
+        Handles failed notification/indication configuration.
+
+        :param error: The error message or code.
         """
-        # To be implemented by subclass
-        pass
-
-    def descriptor_read_value_failed(self, descriptor, error):
-        """
-        Called when a descriptor read command failed.
-        """
-        # To be implemented by subclass
-        pass
-
-    def services_resolved(self):
-        """
-        Obtains the GATT Services and Characteristics information of the device.
-        """
-        command_id = str(uuid.uuid4())
-        command_id_with_newline = f"{command_id}\u000a"
-        current_time = int(time.time())
-
-        # Assuming device_code is already set; otherwise, it should be set appropriately
-        if not self.manager.target_host_name:
-            print("Target host name is not set in DeviceManager.")
-            self.connect_failed("Target host name not set")
-            return
-
-        get_attribute_command = {
-            "mac": self.manager.gateway_mac,  # MAC address of the gateway
-            "type": "cmd",
-            "time": current_time,
-            "from": "CLOUD",
-            "deviceCode": self.manager.device_code if self.manager.device_code else "00000000-0000-0000-0000-000000000000",
-            "data": {
-                "command": "getAttribute",
-                "arguments": {
-                    "mac": self.mac_address,
-                    "value": {
-                        "mac": self.mac_address
-                    },
-                    "attribute": "mod.ble.inspect",
-                    "ep": 1
-                },
-                "id": command_id_with_newline
-            },
-            "to": "BLE"
-        }
-
-        print(f"Sending getAttribute command to inspect device {self.mac_address} with command ID: {command_id}")
-        self.manager.send_command(get_attribute_command, command_id, command_type="inspect", characteristic=None)
-
-        # Wait for cmdResult
-        cmd_result = self.manager.wait_for_cmd_result(command_id, timeout=30)
-        if not cmd_result:
-            self.connect_failed("No cmdResult received.")
-            return
-
-        cmd_code = cmd_result.get('data', {}).get('code', -1)
-        if cmd_code == 0:
-            print(f"getAttribute command succeeded with code 0 for device {self.mac_address}.")
-        elif cmd_code == 99:
-            print(f"Gateway is processing connection for device {self.mac_address} with code 99. Waiting for connection confirmation.")
-            # Wait for "mod.ble.connected" event
-            if not self.connected_event.wait(timeout=30):
-                self.connect_failed("Connection timeout after receiving code 99")
-                return
-            else:
-                print(f"Device {self.mac_address} connected after code 99.")
-        else:
-            # For any other non-99 code, treat as error
-            self.connect_failed(f"Gateway returned non-99 error code: {cmd_code}")
-            return
-
-        # Wait for reportAttribute only if services are not yet resolved
-        if not self._is_services_resolved:
-            report_attribute = self.manager.wait_for_report_attribute(command_id, timeout=30)
-            if not report_attribute:
-                self.connect_failed("No reportAttribute received.")
-                return
-
-            # Extract services and characteristics
-            try:
-                services_data = report_attribute.get('data', {}).get('value', {}).get('services', [])
-                self._parse_services(services_data)
-                self._is_services_resolved = True
-                self.connect_succeeded()
-                print(f"Services and characteristics resolved for device {self.mac_address}.")
-            except Exception as e:
-                self.connect_failed(f"Failed to parse services: {e}")
-
-    def _parse_services(self, services_data):
-        """
-        Parses the services and characteristics data and populates the services list.
-
-        :param services_data: List of services data from MQTT.
-        """
-        self.services = []
-        for service_info in services_data:
-            service = Service(
-                device=self,
-                uuid=service_info.get('uuid', ''),
-                servicename=service_info.get('servicename', '')
-            )
-            characteristics_data = service_info.get('characteristics', [])
-            for char_info in characteristics_data:
-                characteristic = Characteristic(
-                    service=service,
-                    uuid=char_info.get('uuid', ''),
-                    handle=char_info.get('handle', 0),
-                    properties=char_info.get('properties', ''),
-                    length=char_info.get('len', 0),
-                    value=char_info.get('value', ''),
-                    hexvalue=char_info.get('hexvalue', '')
-                )
-                service.characteristics.append(characteristic)
-            self.services.append(service)
+        print(f"Failed to configure notifications/indications for Characteristic {self.uuid}: {error}")
 
     # Additional methods can be implemented as needed
 
@@ -947,7 +940,7 @@ class Characteristic:
                 return None
 
             # Wait for reportAttribute only if services are not yet resolved
-            if not self.service.is_services_resolved():
+            if self.service.device.is_services_resolved():
                 report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
                 if not report_attribute:
                     print(f"Timeout waiting for reportAttribute of getAttribute command ID: {command_id}")
@@ -1061,7 +1054,7 @@ class Characteristic:
                 return False
 
             # Wait for reportAttribute only if services are not yet resolved
-            if not self.service.is_services_resolved():
+            if not self.service.device.is_services_resolved():
                 report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
                 if not report_attribute:
                     print(f"Timeout waiting for reportAttribute of setAttribute command ID: {command_id}")
