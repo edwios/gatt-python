@@ -250,10 +250,12 @@ class DeviceManager:
                                 command['report_event'].set()
                                 print(f"Received reportAttribute for command ID: {cmd_id}")
 
-                                # Invoke the callback only for reportAttribute
+                                # Delegate the handling to the Device's characteristic_value_updated method
                                 characteristic = command.get('characteristic')
                                 if characteristic:
-                                    characteristic.characteristic_value_updated(characteristic_data)
+                                    device = characteristic.service.device if characteristic.service else None
+                                    if device and characteristic_uuid:
+                                        device.characteristic_value_updated(characteristic_uuid, characteristic_data)
                                 break
 
                 elif attribute == "mod.device_list":
@@ -723,51 +725,59 @@ class Device:
         """
         return self._is_services_resolved
 
-    def characteristic_value_updated(self, value):
+    def characteristic_value_updated(self, uuid, value):
         """
-        Updates the characteristic value when a notification or indication is received.
-
+        Handles the updated value of a characteristic.
+        This method is intended to be overridden by subclasses for application-specific handling.
+    
+        :param uuid: UUID of the characteristic that was updated.
         :param value: The new value of the characteristic as a hexadecimal string.
         """
-        self.value = value
-        self.hexvalue = value
-        print(f"Characteristic {self.uuid} value updated via notification/indication: {self.hexvalue}")
+        print(f"Device {self.mac_address}: Characteristic {uuid} updated with value {value}")
+        # Subclasses like FirmwareDevice can override this method to implement specific behavior
 
-    def characteristic_read_value_failed(self, error):
+    def characteristic_read_value_failed(self, characteristic, error):
         """
         Handles a failed read operation.
 
+        :param characteristic: The Characteristic instance that failed the read operation.
         :param error: The error message or code.
         """
-        print(f"Failed to read value from Characteristic {self.uuid}: {error}")
+        print(f"Failed to read value from Characteristic {characteristic.uuid} on device {self.mac_address}: {error}")
 
     def characteristic_write_value_succeeded(self, characteristic):
         """
         Handles a successful write operation.
-        """
-        print(f"Successfully wrote value to Characteristic {self.uuid}.")
 
-    def characteristic_write_value_failed(self, error):
+        :param characteristic: The Characteristic instance that succeeded the write operation.
+        """
+        print(f"Successfully wrote value to Characteristic {characteristic.uuid} on device {self.mac_address}.")
+
+    def characteristic_write_value_failed(self, characteristic, error):
         """
         Handles a failed write operation.
 
+        :param characteristic: The Characteristic instance that failed the write operation.
         :param error: The error message or code.
         """
-        print(f"Failed to write value to Characteristic {self.uuid}: {error}")
+        print(f"Failed to write value to Characteristic {characteristic.uuid} on device {self.mac_address}: {error}")
 
     def characteristic_enable_notifications_succeeded(self, characteristic):
         """
         Handles successful notification/indication configuration.
+
+        :param characteristic: The Characteristic instance that was configured.
         """
-        print(f"Successfully configured notifications/indications for Characteristic {self.uuid}.")
+        print(f"Successfully configured notifications/indications for Characteristic {characteristic.uuid} on device {self.mac_address}.")
 
     def characteristic_enable_notifications_failed(self, characteristic, error):
         """
         Handles failed notification/indication configuration.
 
+        :param characteristic: The Characteristic instance that failed to configure.
         :param error: The error message or code.
         """
-        print(f"Failed to configure notifications/indications for Characteristic {self.uuid}: {error}")
+        print(f"Failed to configure notifications/indications for Characteristic {characteristic.uuid} on device {self.mac_address}: {error}")
 
     # Additional methods can be implemented as needed
 
@@ -857,7 +867,9 @@ class Characteristic:
         :param changed_properties: The properties that have changed.
         :param invalidated_properties: The properties that have been invalidated.
         """
-        pass
+        value = changed_properties.get('Value')
+        if value is not None:
+            self.service.device.characteristic_value_updated(characteristic=self, value=bytes(value).hex())
 
     def read_value(self, timeout=30):
         """
@@ -1199,17 +1211,6 @@ class Characteristic:
             self.characteristic_enable_notifications_failed(self, str(e))
             return False
 
-    def characteristic_value_updated(self, value):
-        """
-        Updates the characteristic value when a notification or indication is received.
-
-        :param value: The new value of the characteristic as a hexadecimal string.
-        """
-        self.value = value
-        self.hexvalue = value
-        print(f"Characteristic {self.uuid} value updated via notification/indication: {self.hexvalue}")
-        # Delegate the handling to the parent Device
-        self.service.device.characteristic_value_updated(self.uuid, value)  # Added line
 
     def characteristic_read_value_failed(self, error):
         """
@@ -1217,14 +1218,13 @@ class Characteristic:
 
         :param error: The error message or code.
         """
-        print(f"Failed to read value from Characteristic {self.uuid}: {error}")
+        self.service.device.characteristic_read_value_failed(self, error)
 
     def characteristic_write_value_succeeded(self, characteristic):
         """
         Handles a successful write operation.
         """
-        print(f"Successfully wrote value to Characteristic {self.uuid}.")
-        self.service.device.characteristic_write_value_succeeded(self)  # Added line
+        self.service.device.characteristic_write_value_succeeded(characteristic)  # Added line
 
     def characteristic_write_value_failed(self, error):
         """
@@ -1232,15 +1232,13 @@ class Characteristic:
 
         :param error: The error message or code.
         """
-        print(f"Failed to write value to Characteristic {self.uuid}: {error}")
         self.service.device.characteristic_write_value_failed(self, error)  # Added line
 
     def characteristic_enable_notifications_succeeded(self, characteristic):
         """
         Handles successful notification/indication configuration.
         """
-        print(f"Successfully configured notifications/indications for Characteristic {self.uuid}.")
-        self.service.device.characteristic_enable_notifications_succeeded(self)  # Added line
+        self.service.device.characteristic_enable_notifications_succeeded(characteristic)  # Added line
 
     def characteristic_enable_notifications_failed(self, characteristic, error):
         """
@@ -1248,8 +1246,7 @@ class Characteristic:
 
         :param error: The error message or code.
         """
-        print(f"Failed to configure notifications/indications for Characteristic {self.uuid}: {error}")
-        self.service.device.characteristic_enable_notifications_failed(self, error)
+        self.service.device.characteristic_enable_notifications_failed(characteristic, error)
 
 
 def _error_from_mqtt_error(e):

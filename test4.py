@@ -57,8 +57,11 @@ class FirmwareDevice(Device):
         :param uuid: UUID of the characteristic that was updated.
         :param value: The new value of the characteristic as a hexadecimal string.
         """
-        # Check if the updated characteristic is the firmware characteristic
-        if hasattr(self, 'firmware_char') and self.firmware_char and self.firmware_char.uuid.lower() == uuid.lower():
+        # Define UUIDs
+        standard_uuid = "2A26"  # Standard Firmware Revision String UUID
+        custom_uuid = "00010203-0405-0607-0809-0A0B0C0D1921"  # Example Custom UUID
+
+        if uuid.lower() in [standard_uuid.lower(), custom_uuid.lower()]:
             try:
                 # Decode the hexadecimal string to get the firmware version
                 firmware_version = bytes.fromhex(value).decode('utf-8')
@@ -70,7 +73,7 @@ class FirmwareDevice(Device):
         else:
             print(f"Characteristic {uuid} value updated for device {self.mac_address}: {value}")
 
-    def characteristic_read_value_failed(self, error):
+    def characteristic_read_value_failed(self, characteristic, error):
         """
         Callback when reading a characteristic value fails.
 
