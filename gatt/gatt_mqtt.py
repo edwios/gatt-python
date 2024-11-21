@@ -4,6 +4,7 @@ import time
 import uuid
 import paho.mqtt.client as mqtt
 import ssl
+import sys
 from . import errors  # Assuming errors module exists
 
 class DeviceManager:
@@ -28,7 +29,7 @@ class DeviceManager:
         :param device_code: UUID of gateway
         :param gateway_mac: MAC of gateway
         """
-        print(f'Initialising DeviceManager')
+        print(f'Initialising DeviceManager', file=sys.stderr)
         self.host_name = host_name
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
@@ -129,10 +130,10 @@ class DeviceManager:
             # Subscribe to the event topic
             event_topic = f"telldus/tellstick/{self.target_host_name}/event"
             client.subscribe(event_topic)
-            print(f"Connected to MQTT broker and subscribed to {event_topic}")
+            print(f"Connected to MQTT broker and subscribed to {event_topic}", file=sys.stderr)
         else:
             self.is_adapter_powered = False
-            print(f"Failed to connect to MQTT broker with result code {rc}")
+            print(f"Failed to connect to MQTT broker with result code {rc}", file=sys.stderr)
 
     def _on_disconnect(self, client, userdata, rc):
         """
@@ -144,9 +145,9 @@ class DeviceManager:
         """
         self.is_adapter_powered = False
         if rc != 0:
-            print("Unexpected MQTT disconnection.")
+            print("Unexpected MQTT disconnection.", file=sys.stderr)
         else:
-            print("MQTT client disconnected successfully.")
+            print("MQTT client disconnected successfully.", file=sys.stderr)
 
     def _on_message(self, client, userdata, msg):
         """
@@ -159,14 +160,14 @@ class DeviceManager:
         try:
             payload = msg.payload.decode('utf-8')
             data = json.loads(payload)
-            # print(f'MQTT msg:\n{payload}\n')
+            # print(f'MQTT msg:\n{payload}\n', file=sys.stderr)
             message_type = data.get('type', '')
             current_device_code = data.get('deviceCode', '')
             command_id = None
 
             # Handle cmdResult messages
             if message_type == 'cmdResult':
-                print(f'Handling {message_type}')
+                print(f'Handling {message_type}', file=sys.stderr)
                 cmd_id_raw = data.get('data', {}).get('id', '').strip()
                 cmd_code = data.get('data', {}).get('code', -1)
 
@@ -175,7 +176,7 @@ class DeviceManager:
                     if command_entry:
                         command_entry['response'] = data
                         command_entry['event'].set()
-                        print(f"Received cmdResult for command ID: {cmd_id_raw} with code: {cmd_code}")
+                        print(f"Received cmdResult for command ID: {cmd_id_raw} with code: {cmd_code}", file=sys.stderr)
 
                         # Check if this cmdResult is for a mod.ble.inspect command
                         if command_entry['command_type'] == "inspect" and cmd_code == 0:
@@ -183,7 +184,7 @@ class DeviceManager:
                             target_mac = data.get('data', {}).get('arguments', {}).get('mac', '').strip()
                             if target_mac:
                                 self._inspect_pending_devices.add(target_mac)
-                                print(f"Device {target_mac} is pending mod.ble.inspect reportAttribute.")
+                                print(f"Device {target_mac} is pending mod.ble.inspect reportAttribute.", file=sys.stderr)
 
             # Handle reportAttribute messages
             elif message_type == 'reportAttribute':
@@ -191,15 +192,15 @@ class DeviceManager:
                 target_mac = data.get('data', {}).get('mac', '').strip()
 
                 if attribute == "mod.ble.connected":
-                    print(f"Received connected event for MAC: {target_mac}")
+                    print(f"Received connected event for MAC: {target_mac}", file=sys.stderr)
                     device = self._devices.get(target_mac)
                     if device:
                         device.connect_succeeded()
                     else:
-                        print(f"No device found with MAC: {target_mac} for connected event.")
+                        print(f"No device found with MAC: {target_mac} for connected event.", file=sys.stderr)
 
                 elif attribute == "mod.ble.disconnected":
-                    print(f"Received disconnected event for MAC: {target_mac}")
+                    print(f"Received disconnected event for MAC: {target_mac}", file=sys.stderr)
                     device = self._devices.get(target_mac)
                     if device:
                         # Extract 'reason' and 'rssi' from the message
@@ -225,14 +226,14 @@ class DeviceManager:
                         scan_rssi = device.rssi if device.rssi is not None else "Not available"
 
                         # Print the extracted information
-                        print(f"Device {target_mac} disconnected.")
-                        print(f"Reason (hex): {reason_hex}")
-                        print(f"RSSI: {scan_rssi}")
+                        print(f"Device {target_mac} disconnected.", file=sys.stderr)
+                        print(f"Reason (hex, file=sys.stderr): {reason_hex}")
+                        print(f"RSSI: {scan_rssi}", file=sys.stderr)
 
                         # Invoke the disconnect succeeded method
                         device.disconnect_succeeded()
                     else:
-                        print(f"No device found with MAC: {target_mac} for disconnected event.")
+                        print(f"No device found with MAC: {target_mac} for disconnected event.", file=sys.stderr)
 
                 elif attribute == "mod.ble.attr":
                     # Existing handling for mod.ble.attr
@@ -248,7 +249,7 @@ class DeviceManager:
                                 command.get('characteristic_uuid', '').lower() == characteristic_uuid.lower()):
                                 command['report'] = data
                                 command['report_event'].set()
-                                print(f"Received reportAttribute for command ID: {cmd_id}")
+                                print(f"Received reportAttribute for command ID: {cmd_id}", file=sys.stderr)
 
                                 # Delegate the handling to the Device's characteristic_value_updated method
                                 characteristic = command.get('characteristic')
@@ -259,7 +260,7 @@ class DeviceManager:
                                 break
 
                 elif attribute == "mod.device_list":
-                    print("Handling mod.device_list reportAttribute.")
+                    print("Handling mod.device_list reportAttribute.", file=sys.stderr)
                     # Process device discovery as before
                     device_list = data.get('data', {}).get('value', {}).get('device_list', [])
 
@@ -276,7 +277,7 @@ class DeviceManager:
                                         if device:
                                             self._devices[mac] = device
                                             device.rssi = scan_rssi
-                                            print(f"Discovered device named {dev_name} with MAC: {mac} and RSSI: {scan_rssi}")
+                                            print(f"Discovered device named {dev_name} with MAC: {mac} and RSSI: {scan_rssi}", file=sys.stderr)
 
                                     # Update device attributes if necessary
                                     # self._devices[mac].update_attributes(device_info)
@@ -285,7 +286,7 @@ class DeviceManager:
                         pass
 
                 elif attribute == "mod.ble.inspect":
-                    print(f"Handling {attribute} reportAttribute.")
+                    print(f"Handling {attribute} reportAttribute.", file=sys.stderr)
                     # Process mod.ble.inspect reportAttribute
                     # Extract 'deviceCode' from the top-level of the message
                     gateway_uuid = data.get('deviceCode', '').strip()
@@ -297,16 +298,16 @@ class DeviceManager:
                         if device:
                             if gateway_uuid == self.device_code:
                                 device.services_resolved(data)
-                                print(f"Processed mod.ble.inspect for device {mac}.")
+                                print(f"Processed mod.ble.inspect for device {mac}.", file=sys.stderr)
                             else:
-                                print(f"Gateway UUID mismatch for device {mac}: expected {self.device_code}, got {gateway_uuid}")
+                                print(f"Gateway UUID mismatch for device {mac}: expected {self.device_code}, got {gateway_uuid}", file=sys.stderr)
                         else:
-                            print(f"No device found with MAC: {mac} for mod.ble.inspect reportAttribute.")
+                            print(f"No device found with MAC: {mac} for mod.ble.inspect reportAttribute.", file=sys.stderr)
 
                         # Remove the device from the pending set regardless of UUID match
                         self._inspect_pending_devices.discard(mac)
                     else:
-                        print(f"Received mod.ble.inspect reportAttribute for device {mac}, which is not pending inspection.")
+                        print(f"Received mod.ble.inspect reportAttribute for device {mac}, which is not pending inspection.", file=sys.stderr)
 
                 else:
                     # Other reportAttribute messages can be handled here
@@ -317,9 +318,9 @@ class DeviceManager:
                 pass
 
         except json.JSONDecodeError:
-            print("Received invalid JSON payload.")
+            print("Received invalid JSON payload.", file=sys.stderr)
         except Exception as e:
-            print(f"Error processing MQTT message: {e}")
+            print(f"Error processing MQTT message: {e}", file=sys.stderr)
 
     def send_command(self, command_json, command_id, command_type=None, characteristic=None):
         """
@@ -332,7 +333,7 @@ class DeviceManager:
         :return: None
         """
         with self._commands_lock:
-            print("Acquiring lock at send_command")
+            print("Acquiring lock at send_command", file=sys.stderr)
             try:
                 self._pending_commands[command_id] = {
                     'event': threading.Event(),
@@ -350,14 +351,14 @@ class DeviceManager:
                     target_mac = command_json.get('data', {}).get('arguments', {}).get('mac', '').strip()
                     if target_mac:
                         self._inspect_pending_devices.add(target_mac)
-                        print(f"Device {target_mac} is pending mod.ble.inspect reportAttribute.")
+                        print(f"Device {target_mac} is pending mod.ble.inspect reportAttribute.", file=sys.stderr)
             finally:
-                print("Released acquired lock at send_command")
+                print("Released acquired lock at send_command", file=sys.stderr)
 
         # Publish the command to the appropriate topic
         command_topic = f"telldus/tellstick/{self.target_host_name}/command"
         self._adapter.publish(command_topic, payload=json.dumps(command_json), qos=1, retain=False)
-        print(f"Sent command ID: {command_id} to topic: {command_topic}")
+        print(f"Sent command ID: {command_id} to topic: {command_topic}", file=sys.stderr)
 
     def _get_service_uuid(self, characteristic):
         """
@@ -390,18 +391,18 @@ class DeviceManager:
         :return: The cmdResult data if received, else None
         """
         with self._commands_lock:
-            print("Acquiring lock at wait_for_cmd_result")
+            print("Acquiring lock at wait_for_cmd_result", file=sys.stderr)
             try:
                 command = self._pending_commands.get(command_id)
             finally:
-                print("Released acquired lock at wait_for_cmd_result")
+                print("Released acquired lock at wait_for_cmd_result", file=sys.stderr)
 
         if command:
             event_set = command['event'].wait(timeout)
             if event_set:
                 return command['response']
             else:
-                print(f"Timeout waiting for cmdResult of command ID: {command_id}")
+                print(f"Timeout waiting for cmdResult of command ID: {command_id}", file=sys.stderr)
         return None
 
     def wait_for_report_attribute(self, command_id, timeout=30):
@@ -413,18 +414,18 @@ class DeviceManager:
         :return: The reportAttribute data if received, else None
         """
         with self._commands_lock:
-            print("Acquiring lock at wait_for_report_attribute")
+            print("Acquiring lock at wait_for_report_attribute", file=sys.stderr)
             try:
                 command = self._pending_commands.get(command_id)
             finally:
-                print("Released acquired lock at wait_for_report_attribute")
+                print("Released acquired lock at wait_for_report_attribute", file=sys.stderr)
 
         if command:
             event_set = command['report_event'].wait(timeout)
             if event_set:
                 return command['report']
             else:
-                print(f"Timeout waiting for reportAttribute of command ID: {command_id}")
+                print(f"Timeout waiting for reportAttribute of command ID: {command_id}", file=sys.stderr)
         return None
 
     def run(self):
@@ -433,7 +434,7 @@ class DeviceManager:
 
         This call blocks until `stop()` is called.
         """
-        print("DeviceManager is running. Press Ctrl+C to stop.")
+        print("DeviceManager is running. Press Ctrl+C to stop.", file=sys.stderr)
         try:
             while not self._stop_event.is_set():
                 time.sleep(1)
@@ -445,13 +446,13 @@ class DeviceManager:
         Stops the MQTT client and the main loop.
         """
         if not self._stop_event.is_set():
-            print("Stopping DeviceManager...")
+            print("Stopping DeviceManager...", file=sys.stderr)
             self._stop_event.set()
             if self._adapter:
-                print("Disconnecting MQTT client...")
+                print("Disconnecting MQTT client...", file=sys.stderr)
                 self._adapter.disconnect()
                 self._adapter.loop_stop()
-            print("DeviceManager stopped.")
+            print("DeviceManager stopped.", file=sys.stderr)
 
     def devices(self):
         """
@@ -468,25 +469,25 @@ class DeviceManager:
         :param dev_names: A list of device names to filter discovered devices.
         """
         if not dev_names:
-            print("No device names provided for discovery.")
+            print("No device names provided for discovery.", file=sys.stderr)
             return
 
         self._dev_names = set(dev_names)
         self._discovery_active = True
         self._devices.clear()
-        print(f"Started discovery for devices: {self._dev_names}")
+        print(f"Started discovery for devices: {self._dev_names}", file=sys.stderr)
 
     def stop_discovery(self):
         """
         Stops the ongoing device discovery.
         """
         if self._discovery_active:
-            print("Stopping discovery...")
+            print("Stopping discovery...", file=sys.stderr)
             self._discovery_active = False
             self._dev_names.clear()
             self._devices.clear()
         else:
-            print("Discovery is not active.")
+            print("Discovery is not active.", file=sys.stderr)
 
     def _device_discovered(self, mac_address):
         """
@@ -529,7 +530,7 @@ class DeviceManager:
             device = self.make_device(mac_address)
             if device:
                 self._devices[mac_address] = device
-                print(f"Manually added device with MAC: {mac_address}")
+                print(f"Manually added device with MAC: {mac_address}", file=sys.stderr)
 
     def remove_device(self, mac_address):
         """
@@ -539,7 +540,7 @@ class DeviceManager:
         """
         if mac_address in self._devices:
             del self._devices[mac_address]
-            print(f"Removed device with MAC: {mac_address}")
+            print(f"Removed device with MAC: {mac_address}", file=sys.stderr)
 
     def remove_all_devices(self, skip_alias=None):
         """
@@ -555,7 +556,7 @@ class DeviceManager:
 
         for key in keys_to_be_deleted:
             del self._devices[key]
-            print(f"Removed device with MAC: {key}")
+            print(f"Removed device with MAC: {key}", file=sys.stderr)
 
     def update_devices(self):
         """
@@ -585,20 +586,20 @@ class Device:
         Called when an advertisement package has been received from the device.
         Initiates connection to resolve services.
         """
-        print(f"Device {self.mac_address} advertised.")
+        print(f"Device {self.mac_address} advertised.", file=sys.stderr)
 
     def invalidate(self):
         """
         Invalidates the device, performing any necessary cleanup.
         """
-        print(f"Device {self.mac_address} invalidated.")
+        print(f"Device {self.mac_address} invalidated.", file=sys.stderr)
         self.disconnect()
 
     def connect(self):
         """
         Initiates connection by sending mod.ble.inspect command.
         """
-        print(f"Connecting to device {self.mac_address}...")
+        print(f"Connecting to device {self.mac_address}...", file=sys.stderr)
         self.send_inspect_command()
 
     def send_inspect_command(self):
@@ -629,7 +630,7 @@ class Device:
             "to": "BLE"
         }
 
-        print(f"Sending mod.ble.inspect command to device {self.mac_address} with command ID: {command_id}")
+        print(f"Sending mod.ble.inspect command to device {self.mac_address} with command ID: {command_id}", file=sys.stderr)
         self.manager.send_command(inspect_command, command_id, command_type="inspect", characteristic=None)
 
     def services_resolved(self, report_attribute_data):
@@ -646,7 +647,7 @@ class Device:
             self._parse_services(services_data)
             self._is_services_resolved = True
             self.connect_succeeded()
-            print(f"Services and characteristics resolved for device {self.mac_address}.")
+            print(f"Services and characteristics resolved for device {self.mac_address}.", file=sys.stderr)
         except Exception as e:
             self.connect_failed(f"Failed to parse services: {e}")
 
@@ -684,7 +685,7 @@ class Device:
         if not self._is_connected:
             self._is_connected = True
             self.connected_event.set()
-            print(f"Device {self.mac_address} connected successfully.")
+            print(f"Device {self.mac_address} connected successfully.", file=sys.stderr)
 
     def connect_failed(self, error):
         """
@@ -693,14 +694,14 @@ class Device:
         if self._is_connected:
             self._is_connected = False
             self.connected_event.clear()
-        print(f"Failed to connect to device {self.mac_address}: {error}")
+        print(f"Failed to connect to device {self.mac_address}: {error}", file=sys.stderr)
 
     def disconnect(self):
         """
         Disconnects from the device, if connected.
         """
         if self._is_connected:
-            print(f"Disconnecting from device {self.mac_address}...")
+            print(f"Disconnecting from device {self.mac_address}...", file=sys.stderr)
             # Implement actual disconnection logic here
             self._is_connected = False
             self.connected_event.clear()
@@ -711,7 +712,7 @@ class Device:
         Called when the device has disconnected successfully.
         """
         self.services = []
-        print(f"Device {self.mac_address} disconnected successfully.")
+        print(f"Device {self.mac_address} disconnected successfully.", file=sys.stderr)
 
     def is_connected(self):
         """
@@ -733,7 +734,7 @@ class Device:
         :param uuid: UUID of the characteristic that was updated.
         :param value: The new value of the characteristic as a hexadecimal string.
         """
-        print(f"Device {self.mac_address}: Characteristic {uuid} updated with value {value}")
+        print(f"Device {self.mac_address}: Characteristic {uuid} updated with value {value}", file=sys.stderr)
         # Subclasses like FirmwareDevice can override this method to implement specific behavior
 
     def characteristic_read_value_failed(self, characteristic, error):
@@ -743,7 +744,7 @@ class Device:
         :param characteristic: The Characteristic instance that failed the read operation.
         :param error: The error message or code.
         """
-        print(f"Failed to read value from Characteristic {characteristic.uuid} on device {self.mac_address}: {error}")
+        print(f"Failed to read value from Characteristic {characteristic.uuid} on device {self.mac_address}: {error}", file=sys.stderr)
 
     def characteristic_write_value_succeeded(self, characteristic):
         """
@@ -751,7 +752,7 @@ class Device:
 
         :param characteristic: The Characteristic instance that succeeded the write operation.
         """
-        print(f"Successfully wrote value to Characteristic {characteristic.uuid} on device {self.mac_address}.")
+        print(f"Successfully wrote value to Characteristic {characteristic.uuid} on device {self.mac_address}.", file=sys.stderr)
 
     def characteristic_write_value_failed(self, characteristic, error):
         """
@@ -760,7 +761,7 @@ class Device:
         :param characteristic: The Characteristic instance that failed the write operation.
         :param error: The error message or code.
         """
-        print(f"Failed to write value to Characteristic {characteristic.uuid} on device {self.mac_address}: {error}")
+        print(f"Failed to write value to Characteristic {characteristic.uuid} on device {self.mac_address}: {error}", file=sys.stderr)
 
     def characteristic_enable_notifications_succeeded(self, characteristic):
         """
@@ -768,7 +769,7 @@ class Device:
 
         :param characteristic: The Characteristic instance that was configured.
         """
-        print(f"Successfully configured notifications/indications for Characteristic {characteristic.uuid} on device {self.mac_address}.")
+        print(f"Successfully configured notifications/indications for Characteristic {characteristic.uuid} on device {self.mac_address}.", file=sys.stderr)
 
     def characteristic_enable_notifications_failed(self, characteristic, error):
         """
@@ -777,7 +778,7 @@ class Device:
         :param characteristic: The Characteristic instance that failed to configure.
         :param error: The error message or code.
         """
-        print(f"Failed to configure notifications/indications for Characteristic {characteristic.uuid} on device {self.mac_address}: {error}")
+        print(f"Failed to configure notifications/indications for Characteristic {characteristic.uuid} on device {self.mac_address}: {error}", file=sys.stderr)
 
     # Additional methods can be implemented as needed
 
@@ -878,15 +879,15 @@ class Characteristic:
         :param timeout: Timeout in seconds for waiting for the response.
         """
         if "read" not in self.properties.lower():
-            print(f"Characteristic {self.uuid} does not have read property.")
+            print(f"Characteristic {self.uuid} does not have read property.", file=sys.stderr)
             return  # Optionally, you can remove this line if you want to avoid returning anything.
 
         device = self.service.device
-        print(f"Attempting to read Characteristic {self.uuid} on device {device.mac_address}")
+        print(f"Attempting to read Characteristic {self.uuid} on device {device.mac_address}", file=sys.stderr)
 
         # Wait for the device to be connected before proceeding
         if not device.connected_event.wait(timeout=10):
-            print(f"Device {device.mac_address} not connected within timeout. Cannot read Characteristic {self.uuid}.")
+            print(f"Device {device.mac_address} not connected within timeout. Cannot read Characteristic {self.uuid}.", file=sys.stderr)
             device.connect_failed("Connection timeout before read operation")
             self.characteristic_read_value_failed("Connection timeout before read operation")
             return  # Optionally, remove this line.
@@ -921,31 +922,31 @@ class Characteristic:
         try:
             # Send the getAttribute command
             device.manager.send_command(get_attribute_command, command_id, command_type="read", characteristic=self)
-            print(f"Sent getAttribute command with ID: {command_id} for Characteristic {self.uuid}")
+            print(f"Sent getAttribute command with ID: {command_id} for Characteristic {self.uuid}", file=sys.stderr)
 
             # Wait for cmdResult
             cmd_result = device.manager.wait_for_cmd_result(command_id, timeout=timeout)
             if not cmd_result:
-                print(f"Timeout waiting for cmdResult of getAttribute command ID: {command_id}")
+                print(f"Timeout waiting for cmdResult of getAttribute command ID: {command_id}", file=sys.stderr)
                 self.characteristic_read_value_failed("Timeout waiting for cmdResult")
                 return  # Removed 'return None'
 
             cmd_code = cmd_result.get('data', {}).get('code', -1)
             if cmd_code == 0:
-                print(f"getAttribute command succeeded with code 0 for Characteristic {self.uuid}")
+                print(f"getAttribute command succeeded with code 0 for Characteristic {self.uuid}", file=sys.stderr)
             elif cmd_code == 99:
-                print(f"Gateway is processing connection for Characteristic {self.uuid} with code 99. Waiting for connection confirmation.")
+                print(f"Gateway is processing connection for Characteristic {self.uuid} with code 99. Waiting for connection confirmation.", file=sys.stderr)
                 # Wait for "mod.ble.connected" event
                 if not device.connected_event.wait(timeout=20):
-                    print(f"Device {device.mac_address} not connected within timeout after code 99. Cannot read Characteristic {self.uuid}.")
+                    print(f"Device {device.mac_address} not connected within timeout after code 99. Cannot read Characteristic {self.uuid}.", file=sys.stderr)
                     device.connect_failed("Connection timeout after receiving code 99 during read operation")
                     self.characteristic_read_value_failed("Connection timeout after receiving code 99 during read operation")
                     return  # Removed 'return None'
                 else:
-                    print(f"Device {device.mac_address} connected after code 99 for read operation.")
+                    print(f"Device {device.mac_address} connected after code 99 for read operation.", file=sys.stderr)
             else:
                 # For any other non-99 code, treat as error
-                print(f"getAttribute command failed with code: {cmd_code}")
+                print(f"getAttribute command failed with code: {cmd_code}", file=sys.stderr)
                 self.characteristic_read_value_failed(f"Command failed with code: {cmd_code}")
                 return  # Removed 'return None'
 
@@ -953,14 +954,14 @@ class Characteristic:
             if self.service.device.is_services_resolved():
                 report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
                 if not report_attribute:
-                    print(f"Timeout waiting for reportAttribute of getAttribute command ID: {command_id}")
+                    print(f"Timeout waiting for reportAttribute of getAttribute command ID: {command_id}", file=sys.stderr)
                     self.characteristic_read_value_failed("Timeout waiting for reportAttribute")
                     return  # Removed 'return None'
 
                 # Extract the characteristic value
                 data = report_attribute.get('data', {}).get('value', {})
                 if data.get('service') != self.service.uuid or data.get('characteristic') != self.uuid:
-                    print("Received reportAttribute does not match the requested service and characteristic UUIDs.")
+                    print("Received reportAttribute does not match the requested service and characteristic UUIDs.", file=sys.stderr)
                     self.characteristic_read_value_failed("Mismatched service or characteristic UUIDs")
                     return  # Removed 'return None'
 
@@ -968,11 +969,11 @@ class Characteristic:
                 # char_data = data.get('data', '')
                 # self.value = char_data
                 # self.hexvalue = char_data  # Assuming the data is already in hex string format
-                # print(f"Read value from Characteristic {self.uuid}: {self.hexvalue}")
+                # print(f"Read value from Characteristic {self.uuid}: {self.hexvalue}", file=sys.stderr)
                 # return self.hexvalue
 
         except Exception as e:
-            print(f"Exception during read_value: {e}")
+            print(f"Exception during read_value: {e}", file=sys.stderr)
             self.characteristic_read_value_failed(str(e))
             return  # Removed 'return None'
 
@@ -985,21 +986,21 @@ class Characteristic:
         :return: True if write was successful, False otherwise.
         """
         if "write" not in self.properties.lower():
-            print(f"Characteristic {self.uuid} does not have write property.")
+            print(f"Characteristic {self.uuid} does not have write property.", file=sys.stderr)
             return False
 
         # Validate that the value is a hexadecimal string
         if not isinstance(value, str) or not all(c in '0123456789abcdefABCDEF' for c in value):
-            print("Value to write must be a hexadecimal string.")
+            print("Value to write must be a hexadecimal string.", file=sys.stderr)
             self.characteristic_write_value_failed("Invalid value format. Must be hexadecimal string.")
             return False
 
         device = self.service.device
-        print(f"Attempting to write to Characteristic {self.uuid} on device {device.mac_address}")
+        print(f"Attempting to write to Characteristic {self.uuid} on device {device.mac_address}", file=sys.stderr)
 
         # Wait for the device to be connected before proceeding
         if not device.connected_event.wait(timeout=10):
-            print(f"Device {device.mac_address} not connected within timeout. Cannot write Characteristic {self.uuid}.")
+            print(f"Device {device.mac_address} not connected within timeout. Cannot write Characteristic {self.uuid}.", file=sys.stderr)
             device.connect_failed("Connection timeout before write operation")
             self.characteristic_write_value_failed("Connection timeout before write operation")
             return False
@@ -1036,31 +1037,31 @@ class Characteristic:
         try:
             # Send the setAttribute command
             device.manager.send_command(set_attribute_command, command_id, command_type="write", characteristic=self)
-            print(f"Sent setAttribute command with ID: {command_id} to write value: {value}")
+            print(f"Sent setAttribute command with ID: {command_id} to write value: {value}", file=sys.stderr)
 
             # Wait for cmdResult
             cmd_result = device.manager.wait_for_cmd_result(command_id, timeout=timeout)
             if not cmd_result:
-                print(f"Timeout waiting for cmdResult of setAttribute command ID: {command_id}")
+                print(f"Timeout waiting for cmdResult of setAttribute command ID: {command_id}", file=sys.stderr)
                 self.characteristic_write_value_failed("Timeout waiting for cmdResult")
                 return False
 
             cmd_code = cmd_result.get('data', {}).get('code', -1)
             if cmd_code == 0:
-                print(f"setAttribute command succeeded with code 0 for Characteristic {self.uuid}")
+                print(f"setAttribute command succeeded with code 0 for Characteristic {self.uuid}", file=sys.stderr)
             elif cmd_code == 99:
-                print(f"Gateway is processing connection for Characteristic {self.uuid} with code 99. Waiting for connection confirmation.")
+                print(f"Gateway is processing connection for Characteristic {self.uuid} with code 99. Waiting for connection confirmation.", file=sys.stderr)
                 # Wait for "mod.ble.connected" event
                 if not device.connected_event.wait(timeout=20):
-                    print(f"Device {device.mac_address} not connected within timeout after code 99. Cannot write Characteristic {self.uuid}.")
+                    print(f"Device {device.mac_address} not connected within timeout after code 99. Cannot write Characteristic {self.uuid}.", file=sys.stderr)
                     device.connect_failed("Connection timeout after receiving code 99 during write operation")
                     self.characteristic_write_value_failed("Connection timeout after receiving code 99 during write operation")
                     return False
                 else:
-                    print(f"Device {device.mac_address} connected after code 99 for write operation.")
+                    print(f"Device {device.mac_address} connected after code 99 for write operation.", file=sys.stderr)
             else:
                 # For any other non-99 code, treat as error
-                print(f"setAttribute command failed with code: {cmd_code}")
+                print(f"setAttribute command failed with code: {cmd_code}", file=sys.stderr)
                 self.characteristic_write_value_failed(f"Command failed with code: {cmd_code}")
                 return False
 
@@ -1068,26 +1069,26 @@ class Characteristic:
             if not self.service.device.is_services_resolved():
                 report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
                 if not report_attribute:
-                    print(f"Timeout waiting for reportAttribute of setAttribute command ID: {command_id}")
+                    print(f"Timeout waiting for reportAttribute of setAttribute command ID: {command_id}", file=sys.stderr)
                     self.characteristic_write_value_failed("Timeout waiting for reportAttribute")
                     return False
 
                 # Assuming setAttribute does not return data, so just mark success
                 self.value = value
                 self.hexvalue = value
-                print(f"Wrote value to Characteristic {self.uuid}: {self.hexvalue}")
+                print(f"Wrote value to Characteristic {self.uuid}: {self.hexvalue}", file=sys.stderr)
                 self.characteristic_write_value_succeeded(self)
                 return True
 
             # If services are already resolved, assume write was successful
             self.value = value
             self.hexvalue = value
-            print(f"Wrote value to Characteristic {self.uuid}: {self.hexvalue}")
+            print(f"Wrote value to Characteristic {self.uuid}: {self.hexvalue}", file=sys.stderr)
             self.characteristic_write_value_succeeded(self)
             return True
 
         except Exception as e:
-            print(f"Exception during write_value: {e}")
+            print(f"Exception during write_value: {e}", file=sys.stderr)
             self.characteristic_write_value_failed(str(e))
             return False
 
@@ -1100,16 +1101,16 @@ class Characteristic:
         :return: True if configuration was successful, False otherwise.
         """
         if "notify" not in self.properties.lower() and "indicate" not in self.properties.lower():
-            print(f"Characteristic {self.uuid} does not support notifications or indications.")
+            print(f"Characteristic {self.uuid} does not support notifications or indications.", file=sys.stderr)
             self.characteristic_enable_notifications_failed(self, "Notifications/Indications not supported.")
             return False
 
         device = self.service.device
-        print(f"Attempting to configure notifications/indications for Characteristic {self.uuid} on device {device.mac_address}")
+        print(f"Attempting to configure notifications/indications for Characteristic {self.uuid} on device {device.mac_address}", file=sys.stderr)
 
         # Wait for the device to be connected before proceeding
         if not device.connected_event.wait(timeout=10):
-            print(f"Device {device.mac_address} not connected within timeout. Cannot configure notifications/indications for Characteristic {self.uuid}.")
+            print(f"Device {device.mac_address} not connected within timeout. Cannot configure notifications/indications for Characteristic {self.uuid}.", file=sys.stderr)
             device.connect_failed("Connection timeout before configure notifications/indications")
             self.characteristic_enable_notifications_failed(self, "Connection timeout before configure notifications/indications")
             return False
@@ -1120,7 +1121,7 @@ class Characteristic:
         elif isinstance(notify, bool):
             mode = 1 if notify else 0
         else:
-            print("Invalid parameter for notify. Must be True, False, or 'indicate'.")
+            print("Invalid parameter for notify. Must be True, False, or 'indicate'.", file=sys.stderr)
             self.characteristic_enable_notifications_failed(self, "Invalid parameter for notify.")
             return False
 
@@ -1162,31 +1163,31 @@ class Characteristic:
         try:
             # Send the setAttribute command
             device.manager.send_command(set_attribute_command, command_id, command_type="notify", characteristic=self)
-            print(f"Sent setAttribute command with ID: {command_id} to set notifications mode: {mode}")
+            print(f"Sent setAttribute command with ID: {command_id} to set notifications mode: {mode}", file=sys.stderr)
 
             # Wait for cmdResult
             cmd_result = device.manager.wait_for_cmd_result(command_id, timeout=timeout)
             if not cmd_result:
-                print(f"Timeout waiting for cmdResult of setAttribute command ID: {command_id}")
+                print(f"Timeout waiting for cmdResult of setAttribute command ID: {command_id}", file=sys.stderr)
                 self.characteristic_enable_notifications_failed(self, "Timeout waiting for cmdResult")
                 return False
 
             cmd_code = cmd_result.get('data', {}).get('code', -1)
             if cmd_code == 0:
-                print(f"setAttribute command succeeded with code 0 for Characteristic {self.uuid}")
+                print(f"setAttribute command succeeded with code 0 for Characteristic {self.uuid}", file=sys.stderr)
             elif cmd_code == 99:
-                print(f"Gateway is processing connection for Characteristic {self.uuid} with code 99. Waiting for connection confirmation.")
+                print(f"Gateway is processing connection for Characteristic {self.uuid} with code 99. Waiting for connection confirmation.", file=sys.stderr)
                 # Wait for "mod.ble.connected" event
                 if not device.connected_event.wait(timeout=20):
-                    print(f"Device {device.mac_address} not connected within timeout after code 99. Cannot configure notifications/indications for Characteristic {self.uuid}.")
+                    print(f"Device {device.mac_address} not connected within timeout after code 99. Cannot configure notifications/indications for Characteristic {self.uuid}.", file=sys.stderr)
                     device.connect_failed("Connection timeout after receiving code 99 during configure notifications/indications")
                     self.characteristic_enable_notifications_failed(self, "Connection timeout after receiving code 99 during configure notifications/indications")
                     return False
                 else:
-                    print(f"Device {device.mac_address} connected after code 99 for configure notifications/indications.")
+                    print(f"Device {device.mac_address} connected after code 99 for configure notifications/indications.", file=sys.stderr)
             else:
                 # For any other non-99 code, treat as error
-                print(f"setAttribute command failed with code: {cmd_code}")
+                print(f"setAttribute command failed with code: {cmd_code}", file=sys.stderr)
                 self.characteristic_enable_notifications_failed(self, f"Command failed with code: {cmd_code}")
                 return False
 
@@ -1194,7 +1195,7 @@ class Characteristic:
             if not self.service.is_services_resolved():
                 report_attribute = device.manager.wait_for_report_attribute(command_id, timeout=timeout)
                 if not report_attribute:
-                    print(f"Timeout waiting for reportAttribute of setAttribute command ID: {command_id}")
+                    print(f"Timeout waiting for reportAttribute of setAttribute command ID: {command_id}", file=sys.stderr)
                     self.characteristic_enable_notifications_failed(self, "Timeout waiting for reportAttribute")
                     return False
 
@@ -1207,7 +1208,7 @@ class Characteristic:
             return True
 
         except Exception as e:
-            print(f"Exception during enable_notifications: {e}")
+            print(f"Exception during enable_notifications: {e}", file=sys.stderr)
             self.characteristic_enable_notifications_failed(self, str(e))
             return False
 
