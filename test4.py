@@ -20,7 +20,7 @@ stdout_handler.setFormatter(stdout_formatter)
 
 # Step 3: Create a handler for WARNING and above messages to stderr
 stderr_handler = logging.StreamHandler(sys.stderr)
-stderr_handler.setLevel(logging.WARNING)  # Handle WARNING and above
+stderr_handler.setLevel(logging.DEBUG)  # Handle WARNING and above
 stderr_formatter = logging.Formatter('%(levelname)s: %(message)s')
 stderr_handler.setFormatter(stderr_formatter)
 
@@ -38,6 +38,27 @@ class FirmwareDevice(Device):
 
     STANDARD_UUID = "2A26"  # Standard Firmware Revision String UUID
     CUSTOM_UUID = "00010203-0405-0607-0809-0A0B0C0D1921"  # Example Custom UUID
+
+    def connect_succeeded(self):
+        super().connect_succeeded()
+        root_logger.info(f"Device {self.mac_address} connected successfully.")
+
+    def services_resolved(self):
+        super().services_resolved()
+        root_logger.warning(f'Service resolved ({len(self.services)} services found)')
+        self.retrieve_firmware_version()
+
+        """
+        device_information_service = next(
+            s for s in self.services
+            if s.uuid == '0000180a-0000-1000-8000-00805f9b34fb')
+
+        firmware_version_characteristic = next(
+            c for c in device_information_service.characteristics
+            if c.uuid == '00002a26-0000-1000-8000-00805f9b34fb')
+
+        firmware_version_characteristic.read_value()
+        """
 
     def retrieve_firmware_version(self):
         """
@@ -73,13 +94,20 @@ class FirmwareDevice(Device):
         :return: The Characteristic instance if found, else None.
         """
         target_uuid = target_uuid.lower()
-        for service in self.services:
-            for characteristic in service.characteristics:
-                if characteristic.uuid.lower() == target_uuid:
-                    return characteristic
+        if len(self.services) == 0:
+            root_logger.warning('No service found!')
+        else:
+            for service in self.services:
+                if len(service.characteristics) == 0:
+                    root_logger.warning(f'No charateristic found for service {service}!')
+                else:
+                    for characteristic in service.characteristics:
+                        root_logger.info(f'Matching char {characteristic.uuid} to {target_uuid}')
+                        if characteristic.uuid.lower() == target_uuid:
+                            return characteristic
         return None
 
-    def characteristic_value_updated(self, uuid, value):
+    def characteristic_value_updated(self, characteristic, value):
         """
         Handles the updated value of a characteristic.
         Prints the firmware version if this characteristic is the firmware characteristic.
@@ -87,7 +115,7 @@ class FirmwareDevice(Device):
         :param uuid: UUID of the characteristic that was updated.
         :param value: The new value of the characteristic as a hexadecimal string.
         """
-        uuid = uuid.lower()
+        uuid = characteristic.uuid.lower()
         if uuid in [self.STANDARD_UUID.lower(), self.CUSTOM_UUID.lower()]:
             try:
                 firmware_version = bytes.fromhex(value).decode('utf-8')
@@ -150,7 +178,7 @@ def main():
         mqtt_user="TELLDUS_030000",
         mqtt_password="qM9KXFw3Dkpt",
         target_host_name="TELLDUS_0300C6",  # Who we are listening to and communicating with
-        device_code="72DB4842-17B3-44FE-95CA-10DA4D209E89",
+        device_code="72db4842-17b3-44fe-95ca-10da4d209e89",
         gateway_mac="ac:ca:54:03:00:c6"
     )
 
@@ -189,13 +217,13 @@ def main():
                     continue
                 else:
                     device.connect()
-                    if not device.connected_event.wait(timeout=10):
+                    if not device.connected_event.wait(timeout=60):
                         root_logger.error(
                             f"Failed to connect to device {device.mac_address} within timeout."
                         )
                         continue
 
-            device.retrieve_firmware_version()
+            # device.retrieve_firmware_version()
             time.sleep(1)  # Prevent command flooding
 
     # Keep the main thread alive to handle asynchronous MQTT responses
