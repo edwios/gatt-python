@@ -13,7 +13,7 @@ from . import errors  # Assuming errors module exists
 
 # Configure logging
 logger = logging.getLogger("DeviceManager")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 class DeviceManager:
     """
@@ -222,9 +222,8 @@ class DeviceManager:
                 if attribute == "mod.ble.connected":
                     logger.debug(f"Received connected event for MAC: {target_mac}")
                     device = self._devices.get(target_mac)
-                    if device:
-                        device.connect_succeeded()
-                    else:
+                    if not device:
+                        # device._services_resolved()
                         logger.error(f"No device found with MAC: {target_mac} for connected event.")
 
                 elif attribute == "mod.ble.disconnected":
@@ -262,9 +261,10 @@ class DeviceManager:
                                 characteristic = command.get('characteristic')
                                 if characteristic:
                                     device = characteristic.service.device if characteristic.service else None
+                                    characteristic.uuid = characteristic_uuid
                                     if device and characteristic_uuid:
                                         device.characteristic_value_updated(
-                                            characteristic_uuid,
+                                            characteristic,
                                             characteristic_data
                                         )
                                 break
@@ -301,7 +301,7 @@ class DeviceManager:
                         device = self._devices.get(mac)
                         if device:
                             if gateway_uuid == self.device_code:
-                                device.services_resolved(data)
+                                device._services_resolved(data)
                                 logger.debug(f"Processed mod.ble.inspect for device {mac}.")
                             else:
                                 logger.error(
@@ -512,8 +512,6 @@ class DeviceManager:
         """
         if self._discovery_active:
             self._discovery_active = False
-            self._dev_names.clear()
-            self._devices.clear()
             logger.info("Stopped discovery.")
         else:
             logger.warning("Discovery is not active.")
@@ -672,7 +670,7 @@ class Device:
             characteristic=None
         )
 
-    def services_resolved(self, report_attribute_data):
+    def _services_resolved(self, report_attribute_data):
         """
         Processes the mod.ble.inspect reportAttribute data to resolve services and characteristics.
 
@@ -683,12 +681,18 @@ class Device:
             if not services_data:
                 raise ValueError("No services data found in mod.ble.inspect reportAttribute.")
 
+            logger.debug(f'Parsing service & char from:\n{services_data}\n')
             self._parse_services(services_data)
             self._is_services_resolved = True
-            self.connect_succeeded()
-            logger.debug(f"Services and characteristics resolved for device {self.mac_address}.")
+            self.services_resolved()
         except Exception as e:
             self.connect_failed(f"Failed to parse services: {e}")
+
+    def services_resolved(self):
+        if self._is_services_resolved:
+            self.connect_succeeded()
+            logger.debug(f"Services and characteristics resolved for device {self.mac_address}.")
+        
 
     def _parse_services(self, services_data):
         """
@@ -767,7 +771,7 @@ class Device:
         """
         return self._is_services_resolved
 
-    def characteristic_value_updated(self, uuid, value):
+    def characteristic_value_updated(self, characteristic, value):
         """
         Handles the updated value of a characteristic.
         This method is intended to be overridden by subclasses for application-specific handling.
@@ -776,7 +780,7 @@ class Device:
         :param value: The new value of the characteristic as a hexadecimal string.
         """
         logger.debug(
-            f"Device {self.mac_address}: Characteristic {uuid} updated with value {value}"
+            f"Device {self.mac_address}: Characteristic {characteristic.uuid} updated with value {value}"
         )
         # Subclasses like FirmwareDevice can override this method to implement specific behavior
 
@@ -920,7 +924,7 @@ class Characteristic:
         value = changed_properties.get('Value')
         if value is not None:
             self.service.device.characteristic_value_updated(
-                uuid=self.uuid,
+                characteristic=self,
                 value=bytes(value).hex()
             )
 
