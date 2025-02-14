@@ -223,8 +223,9 @@ class DeviceManager:
                     logger.debug(f"Received connected event for MAC: {target_mac}")
                     device = self._devices.get(target_mac)
                     if not device:
+                        pass
                         # device._services_resolved()
-                        logger.error(f"No device found with MAC: {target_mac} for connected event.")
+                        # logger.error(f"No device found with MAC: {target_mac} for connected event.")
 
                 elif attribute == "mod.ble.disconnected":
                     logger.debug(f"Received disconnected event for MAC: {target_mac}")
@@ -241,7 +242,8 @@ class DeviceManager:
 
                         device.disconnect_succeeded()
                     else:
-                        logger.error(f"No device found with MAC: {target_mac} for disconnected event.")
+                        pass
+                        # logger.error(f"No device found with MAC: {target_mac} for disconnected event.")
 
                 elif attribute == "mod.ble.attr":
                     service_uuid = data.get('data', {}).get('value', {}).get('service', '')
@@ -309,9 +311,10 @@ class DeviceManager:
                                     f"{self.device_code}, got {gateway_uuid}"
                                 )
                         else:
-                            logger.error(
-                                f"No device found with MAC: {mac} for mod.ble.inspect reportAttribute."
-                            )
+                            pass
+                            # logger.error(
+                            #     f"No device found with MAC: {mac} for mod.ble.inspect reportAttribute."
+                            # )
                         self._inspect_pending_devices.discard(mac)
                     else:
                         logger.warning(
@@ -389,7 +392,7 @@ class DeviceManager:
             qos=1,
             retain=False
         )
-        logger.debug(f"Sent command ID: {command_id} to topic: {command_topic}")
+        logger.debug(f"Sent command ID: {command_json} to topic: {command_topic}")
 
     def _get_service_uuid(self, characteristic):
         """
@@ -506,6 +509,45 @@ class DeviceManager:
         self._devices.clear()
         logger.info(f"Started discovery for devices: {self._dev_names}")
 
+        command_id = str(uuid.uuid4())
+        current_time = int(time.time())
+
+        discovery_command = {
+            "data": {
+                "id": command_id,
+                "arguments": {
+                    "mac": "01020304050607",
+                    "value": {
+                        "interval": "15",
+                        "f_mac": "",
+                        "f_rssi": "-70"
+                    },
+                    "attribute": "mod.ble.interval",
+                    "ep": "0"
+                },
+                "command": "setAttribute",
+            },
+            "deviceCode": self.device_code or "00000000-0000-0000-0000-000000000000",
+            "from": "CLOUD",
+            "mac": self.gateway_mac,
+            "time": current_time,
+            "to": "BLE",
+            "type": "cmd"
+        }
+
+        logger.debug(
+            f"Sending mod.ble.interval command to gateway {self.gateway_mac} "
+            f"with command: {command_id}"
+        )
+        self.send_command(
+            discovery_command,
+            command_id,
+            command_type="discovery",
+            characteristic=None
+        )
+
+
+
     def stop_discovery(self):
         """
         Stops the ongoing device discovery.
@@ -513,6 +555,42 @@ class DeviceManager:
         if self._discovery_active:
             self._discovery_active = False
             logger.info("Stopped discovery.")
+            command_id = str(uuid.uuid4())
+            current_time = int(time.time())
+
+            discovery_command = {
+                "data": {
+                    "id": command_id,
+                    "arguments": {
+                        "mac": "01020304050607",
+                        "value": {
+                            "interval": "86400",
+                            "f_mac": "",
+                            "f_rssi": "-70"
+                        },
+                        "attribute": "mod.ble.interval",
+                        "ep": "0"
+                    },
+                    "command": "setAttribute",
+                },
+                "deviceCode": self.device_code or "00000000-0000-0000-0000-000000000000",
+                "from": "CLOUD",
+                "mac": self.gateway_mac,
+                "time": current_time,
+                "to": "BLE",
+                "type": "cmd"
+            }
+
+            logger.debug(
+                f"Sending mod.ble.interval command to gateway {self.gateway_mac} "
+                f"with command ID: {command_id}"
+            )
+            self.send_command(
+                discovery_command,
+                command_id,
+                command_type="discovery",
+                characteristic=None
+            )
         else:
             logger.warning("Discovery is not active.")
 

@@ -15,7 +15,7 @@ root_logger.setLevel(logging.DEBUG)  # Set to the lowest level to capture all me
 stdout_handler = logging.StreamHandler(sys.stdout)
 stdout_handler.setLevel(logging.INFO)  # Handle INFO and above
 stdout_handler.addFilter(lambda record: record.levelno == logging.INFO)  # Only INFO
-stdout_formatter = logging.Formatter('%(message)s')
+stdout_formatter = logging.Formatter('>> %(message)s')
 stdout_handler.setFormatter(stdout_formatter)
 
 # Step 3: Create a handler for WARNING and above messages to stderr
@@ -84,7 +84,7 @@ class FirmwareDevice(Device):
             f"Reading firmware version from Characteristic UUID {firmware_char.uuid} "
             f"for device {self.mac_address}."
         )
-        firmware_char.read_value()
+        firmware_char.read_value(timeout=80)
 
     def find_characteristic(self, target_uuid):
         """
@@ -183,14 +183,14 @@ def main():
     )
 
     # Start discovery for devices named "TelldusFlow", "BLE Mesh", "BLE MESH"
-    target_device_names = ["TelldusFlow", "BLE Mesh", "BLE MESH"]
+    target_device_names = ["TelldusFlow", "BLE Mesh", "BLE MESH", "jR8bzI9joR", "uRskKI4BUh"]
     device_manager.start_discovery(dev_names=target_device_names)
 
     # Run the DeviceManager in a separate daemon thread
     manager_thread = threading.Thread(target=device_manager.run, daemon=True)
     manager_thread.start()
 
-    discovery_timeout = 40  # seconds
+    discovery_timeout = 20  # seconds
     devices = {}
 
     while not devices:
@@ -204,6 +204,7 @@ def main():
     if not devices:
         root_logger.error("No devices discovered. Exiting.")
     else:
+        device_manager.stop_discovery()
         root_logger.info(f"Discovered {len(devices)} device(s). Retrieving firmware versions...")
         for device in devices:
             root_logger.info(f"Retrieving firmware version for device {device.mac_address}...")
@@ -225,6 +226,7 @@ def main():
 
             # device.retrieve_firmware_version()
             time.sleep(1)  # Prevent command flooding
+    device_manager.stop_discovery()
 
     # Keep the main thread alive to handle asynchronous MQTT responses
     try:
@@ -232,6 +234,8 @@ def main():
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        device_manager.stop_discovery()
+        time.sleep(3)
         root_logger.info("\nShutting down DeviceManager...")
         device_manager.stop()
         manager_thread.join()
