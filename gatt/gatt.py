@@ -2,7 +2,7 @@ import os
 import platform
 
 if platform.system() == 'Linux':
-        from .gatt_linux import *
+        from .gatt_mqtt import *
 elif platform.system() == 'Darwin':
         from .gatt_mqtt import *
 else:
