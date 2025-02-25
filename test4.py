@@ -42,23 +42,7 @@ class FirmwareDevice(Device):
     def connect_succeeded(self):
         super().connect_succeeded()
         root_logger.info(f"Device {self.mac_address} connected successfully.")
-
-    def services_resolved(self):
-        super().services_resolved()
-        root_logger.warning(f'Service resolved ({len(self.services)} services found)')
         self.retrieve_firmware_version()
-
-        """
-        device_information_service = next(
-            s for s in self.services
-            if s.uuid == '0000180a-0000-1000-8000-00805f9b34fb')
-
-        firmware_version_characteristic = next(
-            c for c in device_information_service.characteristics
-            if c.uuid == '00002a26-0000-1000-8000-00805f9b34fb')
-
-        firmware_version_characteristic.read_value()
-        """
 
     def retrieve_firmware_version(self):
         """
@@ -193,48 +177,49 @@ def main():
     discovery_timeout = 20  # seconds
     devices = {}
 
-    while not devices:
-        root_logger.info(f"Waiting for {discovery_timeout} seconds to discover devices...")
-        time.sleep(discovery_timeout)
+    try:
+        while not devices:
+            root_logger.info(f"Waiting for {discovery_timeout} seconds to discover devices...")
+            time.sleep(discovery_timeout)
 
-        devices = device_manager.devices()
+            devices = device_manager.devices()
+            if not devices:
+                root_logger.warning("No devices discovered. Retrying...")
+
         if not devices:
-            root_logger.warning("No devices discovered. Retrying...")
+            root_logger.error("No devices discovered. Exiting.")
+        else:
+            device_manager.stop_discovery()
+            root_logger.info(f"Discovered {len(devices)} device(s). Retrieving firmware versions...")
+            for device in devices:
+                root_logger.info(f"Retrieving firmware version for device {device.mac_address}...")
 
-    if not devices:
-        root_logger.error("No devices discovered. Exiting.")
-    else:
-        device_manager.stop_discovery()
-        root_logger.info(f"Discovered {len(devices)} device(s). Retrieving firmware versions...")
-        for device in devices:
-            root_logger.info(f"Retrieving firmware version for device {device.mac_address}...")
-
-            if not device.is_connected():
-                root_logger.warning(f"Device {device.mac_address} is not connected. Attempting to connect...")
-                if device.rssi < -70:
-                    root_logger.warning(
-                        f"Device {device.mac_address} is too far away (RSSI: {device.rssi})."
-                    )
-                    continue
-                else:
-                    device.connect()
-                    if not device.connected_event.wait(timeout=60):
-                        root_logger.error(
-                            f"Failed to connect to device {device.mac_address} within timeout."
+                if not device.is_connected():
+                    root_logger.warning(f"Device {device.mac_address} is not connected. Attempting to connect...")
+                    if device.rssi < -70:
+                        root_logger.warning(
+                            f"Device {device.mac_address} is too far away (RSSI: {device.rssi})."
                         )
                         continue
+                    else:
+                        device.connect()
+                        if not device.connected_event.wait(timeout=60):
+                            root_logger.error(
+                                f"Failed to connect to device {device.mac_address} within timeout."
+                            )
+                            continue
 
-            # device.retrieve_firmware_version()
-            time.sleep(1)  # Prevent command flooding
-    device_manager.stop_discovery()
+                # device.retrieve_firmware_version()
+                time.sleep(1)  # Prevent command flooding
+        device_manager.stop_discovery()
 
-    # Keep the main thread alive to handle asynchronous MQTT responses
-    try:
+        # Keep the main thread alive to handle asynchronous MQTT responses
         root_logger.info("Firmware retrieval initiated. Press Ctrl+C to exit.")
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         device_manager.stop_discovery()
+        device_manager.disconnect_all_devices()
         time.sleep(3)
         root_logger.info("\nShutting down DeviceManager...")
         device_manager.stop()
