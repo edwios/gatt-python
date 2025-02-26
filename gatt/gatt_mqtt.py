@@ -63,7 +63,7 @@ class DeviceManager:
         self._adapter_properties = False
 
         self._devices = {}
-        self._white_list = []
+        self._white_list = None
         self._dev_names = set()
         self._inspect_pending_devices = set()  # Set of MAC addresses awaiting mod.ble.inspect reportAttribute
         self._discovery_active = False
@@ -115,7 +115,7 @@ class DeviceManager:
         self._adapter.on_message = self._on_message
 
         try:
-            self._adapter.connect_async(self.mqtt_host, self.mqtt_port, keepalive=60)
+            self._adapter.connect_async(self.mqtt_host, self.mqtt_port, keepalive=10)
             logger.debug(f"Connecting to MQTT broker at {self.mqtt_host}:{self.mqtt_port}")
         except Exception as e:
             logger.error(f"Failed to connect to MQTT broker: {e}")
@@ -188,6 +188,9 @@ class DeviceManager:
             retained = msg.retain
             payload = msg.payload.decode('utf-8')
             data = json.loads(payload)
+            origin = data.get('from', '').lower()
+            if not (origin == "ble"):
+                return
             message_type = data.get('type', '')
             command_id = None
             if retained:
@@ -211,14 +214,14 @@ class DeviceManager:
                         logger.debug(f"Received cmdResult for command ID: {cmd_id_raw} with code: {cmd_code}")
 
                         if command_entry['command_type'] == "inspect" and cmd_code == 0:
-                            target_mac = data.get('data', {}).get('arguments', {}).get('mac', '').strip()
+                            target_mac = data.get('data', {}).get('arguments', {}).get('mac', '').strip().lower()
                             if target_mac:
                                 self._inspect_pending_devices.add(target_mac)
                                 logger.debug(f"Device {target_mac} is pending mod.ble.inspect reportAttribute.")
 
             elif message_type == 'reportAttribute':
                 attribute = data.get('data', {}).get('attribute', '').strip()
-                target_mac = data.get('data', {}).get('mac', '').strip()
+                target_mac = data.get('data', {}).get('mac', '').strip().lower()
 
                 if attribute == "mod.ble.connected":
                     logger.debug(f"Received connected event for MAC: {target_mac}")
@@ -228,7 +231,12 @@ class DeviceManager:
                         # device._services_resolved()
                         # logger.error(f"No device found with MAC: {target_mac} for connected event.")
                     else:
-                        device.connect_succeeded()
+                        connect_id = 1
+                        if attribute == "BLE_connect_status":
+                            # Make sure we have a non-zero connect_id
+                            connect_id = data.get('data', {}).get('value', '').get('connect_id', 0)
+                        if connect_id > 0:
+                            device.connect_succeeded()
 
                 elif attribute == "mod.ble.disconnected":
                     logger.debug(f"Received disconnected event for MAC: {target_mac}")
@@ -243,7 +251,7 @@ class DeviceManager:
                         logger.warning(f"Reason (hex): {reason_hex}")
                         logger.warning(f"RSSI: {scan_rssi}")
 
-                        device.disconnect_succeeded()
+                        device._disconnect_succeeded()
                     else:
                         pass
                         # logger.error(f"No device found with MAC: {target_mac} for disconnected event.")
@@ -309,7 +317,7 @@ class DeviceManager:
                 elif attribute == "mod.ble.inspect":
                     logger.debug(f"Handling {attribute} reportAttribute.")
                     gateway_uuid = data.get('deviceCode', '').strip()
-                    mac = data.get('data', {}).get('mac', '').strip()
+                    mac = data.get('data', {}).get('mac', '').strip().lower()
 
                     if mac in self._inspect_pending_devices:
                         device = self._devices.get(mac)
@@ -390,7 +398,7 @@ class DeviceManager:
 
                 if command_type == "inspect":
                     logger.warning(f'mod.ble.inspect is not recommended to be used.')
-                    target_mac = command_json.get('data', {}).get('arguments', {}).get('mac', '').strip()
+                    target_mac = command_json.get('data', {}).get('arguments', {}).get('mac', '').strip().lower()
                     if target_mac:
                         self._inspect_pending_devices.add(target_mac)
                         logger.debug(f"Device {target_mac} is pending mod.ble.inspect reportAttribute.")
@@ -628,6 +636,14 @@ class DeviceManager:
         """
         device.advertised()
 
+    def device_connected(self):
+        """
+        Callback when a device is discovered.
+
+        :param device: The discovered Device instance.
+        """
+        return self._white_list
+
     def make_device(self, mac_address):
         """
         Creates and returns a Device instance for the given MAC address.
@@ -685,9 +701,50 @@ class DeviceManager:
         Disconnect all devices registered with the gateway.
 
         """
+        self.getWhiteList()
+        while self._white_list is None:
+            time.sleep(1)
         for item in self._white_list:
             self.remove_device_from_whitelist(item["mac"])
-            logger.debug(f"Removed device with MAC: {key} from gateway whitelist")
+            logger.debug(f"Removed device with MAC: {item} from gateway whitelist")
+
+    def getWhiteList(self):
+        """
+        Sends the mod.whitelist_del command to the MQTT broker to disconnect from the device.
+        """
+        command_id = str(uuid.uuid4())
+        current_time = int(time.time())
+
+        inspect_command = {
+            "mac": self.gateway_mac,
+            "type": "cmd",
+            "time": current_time,
+            "from": "CLOUD",
+            "deviceCode": self.device_code or "00000000-0000-0000-0000-000000000000",
+            "data": {
+                "command": "getAttribute",
+                "arguments": {
+                    "mac": "00:01:02:03:04:05:06",
+                    "value": {
+                    },
+                    "attribute": "mod.whitelist_get",
+                    "ep": 1
+                },
+                "id": command_id
+            },
+            "to": "BLE"
+        }
+
+        logger.debug(
+            f"Sending mod.whitelist_get command to gateway {self.gateway_mac}"
+            f"with command ID: {command_id}"
+        )
+        self.send_command(
+            inspect_command,
+            command_id,
+            command_type="getWhiteList",
+            characteristic=None
+        )
 
     def remove_device_from_whitelist(self, mac):
         """
@@ -905,44 +962,6 @@ class Device:
             characteristic=None
         )
 
-    def send_getWhiteList_command(self):
-        """
-        Sends the mod.whitelist_del command to the MQTT broker to disconnect from the device.
-        """
-        command_id = str(uuid.uuid4())
-        current_time = int(time.time())
-
-        inspect_command = {
-            "mac": self.manager.gateway_mac,
-            "type": "cmd",
-            "time": current_time,
-            "from": "CLOUD",
-            "deviceCode": self.manager.device_code or "00000000-0000-0000-0000-000000000000",
-            "data": {
-                "command": "getAttribute",
-                "arguments": {
-                    "mac": "00:01:02:03:04:05:06",
-                    "value": {
-                    },
-                    "attribute": "mod.whitelist_get",
-                    "ep": 1
-                },
-                "id": command_id
-            },
-            "to": "BLE"
-        }
-
-        logger.debug(
-            f"Sending mod.whitelist_get command to gateway for device {self.mac_address}"
-            f"with command ID: {command_id}"
-        )
-        self.manager.send_command(
-            inspect_command,
-            command_id,
-            command_type="deleteWhiteList",
-            characteristic=None
-        )
-
     def _services_resolved(self, report_attribute_data):
         """
         Processes the mod.ble.inspect reportAttribute data to resolve services and characteristics.
@@ -1008,19 +1027,28 @@ class Device:
 
         :param error: The error message or code.
         """
-        self.disconnect()   # Has to remove from whiteList connected or not
         if self._is_connected:
+            self.disconnect()   # Has to remove from whiteList connected or not
             self.connected_event.clear()
+        else:
+            self.send_deleteWhiteList_command()
         logger.error(f"Failed to connect to device {self.mac_address}: {error}")
 
     def disconnect(self):
         """
         Disconnects from the device, if connected.
         """
+        self.send_deleteWhiteList_command()
         if self._is_connected:
             logger.debug(f"Disconnecting from device {self.mac_address}...")
             # Implement actual disconnection logic here
-            self.send_deleteWhiteList_command()
+
+    def _disconnect_succeeded(self):
+        """
+        Internal called when the device has disconnected successfully.
+        """
+        self.send_deleteWhiteList_command()
+        self.disconnect_succeeded()
 
     def disconnect_succeeded(self):
         """
@@ -1238,7 +1266,6 @@ class Characteristic:
                         "mac": device.mac_address,
                         "service": self.service.uuid,
                         "characteristic": self.uuid,
-                        "handle": self.handle
                     },
                     "attribute": "mod.ble.attr.get",
                     "ep": 1
