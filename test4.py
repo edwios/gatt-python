@@ -36,8 +36,16 @@ class FirmwareDevice(Device):
     Subclass of Device to handle firmware version retrieval.
     """
 
-    STANDARD_UUID = "2A26"  # Standard Firmware Revision String UUID
+    SERVICE_STANDARD_FIRMWARE="0000180a-0000-1000-8000-00805f9b34fb"
+    SERVICE_CUSTOM_FIRMWARE="00010203-0405-0607-0809-0a0b0c0d1920"
+    STANDARD_UUID = "00002a26-0000-1000-8000-00805f9b34fb"  # Standard Firmware Revision String UUID
     CUSTOM_UUID = "00010203-0405-0607-0809-0A0B0C0D1921"  # Example Custom UUID
+
+    is_busy = True
+
+    def __init__(self, mac_address, manager):
+        super().__init__(mac_address, manager);
+        self.is_busy = True
 
     def connect_succeeded(self):
         super().connect_succeeded()
@@ -68,7 +76,7 @@ class FirmwareDevice(Device):
             f"Reading firmware version from Characteristic UUID {firmware_char.uuid} "
             f"for device {self.mac_address}."
         )
-        firmware_char.read_value(timeout=80)
+        firmware_char.read_value(timeout=60)
 
     def find_characteristic(self, target_uuid):
         """
@@ -78,6 +86,41 @@ class FirmwareDevice(Device):
         :return: The Characteristic instance if found, else None.
         """
         target_uuid = target_uuid.lower()
+
+        # Construct the firmware services and characteristics
+        service_custom = Service(
+            device=self,
+            uuid=self.SERVICE_CUSTOM_FIRMWARE,
+            servicename=''
+        )
+        service_standard = Service(
+            device=self,
+            uuid=self.SERVICE_STANDARD_FIRMWARE,
+            servicename=''
+        )
+        characteristic = Characteristic(
+            service=service_custom,
+            uuid=self.CUSTOM_UUID,
+            handle=0,
+            properties='read',
+            length=6,
+            value='',
+            hexvalue=''
+        )
+        service_custom.characteristics.append(characteristic)
+        characteristic = Characteristic(
+            service=service_standard,
+            uuid=self.STANDARD_UUID,
+            handle=0,
+            properties='read',
+            length=6,
+            value='',
+            hexvalue=''
+        )
+        service_standard.characteristics.append(characteristic)
+        self.services.append(service_standard)
+        self.services.append(service_custom)
+
         if len(self.services) == 0:
             root_logger.warning('No service found!')
         else:
@@ -99,6 +142,7 @@ class FirmwareDevice(Device):
         :param uuid: UUID of the characteristic that was updated.
         :param value: The new value of the characteristic as a hexadecimal string.
         """
+
         uuid = characteristic.uuid.lower()
         if uuid in [self.STANDARD_UUID.lower(), self.CUSTOM_UUID.lower()]:
             try:
@@ -110,10 +154,13 @@ class FirmwareDevice(Device):
                 root_logger.error(
                     f"Device {self.mac_address} Firmware Version (decoded error): {value}"
                 )
+            finally:
+                self.is_busy = False
         else:
             root_logger.debug(
                 f"Characteristic {uuid} value updated for device {self.mac_address}: {value}"
             )
+        self.is_busy = False
 
     def characteristic_read_value_failed(self, error):
         """
@@ -121,9 +168,11 @@ class FirmwareDevice(Device):
 
         :param error: The error message or code.
         """
+
         root_logger.error(
             f"Failed to read firmware version from device {self.mac_address}: {error}"
         )
+        self.is_busy = False
 
     def characteristic_write_value_succeeded(self, characteristic):
         pass
@@ -162,12 +211,18 @@ def main():
         mqtt_user="TELLDUS_030000",
         mqtt_password="qM9KXFw3Dkpt",
         target_host_name="TELLDUS_0300C6",  # Who we are listening to and communicating with
-        device_code="72db4842-17b3-44fe-95ca-10da4d209e89",
+        device_code="948ccb66-7f80-431f-a094-814d997774ab}",
         gateway_mac="ac:ca:54:03:00:c6"
     )
 
     # Start discovery for devices named "TelldusFlow", "BLE Mesh", "BLE MESH"
     target_device_names = ["TelldusFlow", "BLE Mesh", "BLE MESH", "jR8bzI9joR", "uRskKI4BUh"]
+    device_manager.disconnect_all_devices()
+    a=device_manager.device_connected()
+    print(f'Device connected: {a}')
+    while a is None:
+        time.sleep(1)
+        a=device_manager.device_connected()
     device_manager.start_discovery(dev_names=target_device_names)
 
     # Run the DeviceManager in a separate daemon thread
@@ -190,7 +245,8 @@ def main():
             root_logger.error("No devices discovered. Exiting.")
         else:
             device_manager.stop_discovery()
-            root_logger.info(f"Discovered {len(devices)} device(s). Retrieving firmware versions...")
+            root_logger.info(f"Discovered {len(devices)} device(s).")
+            device_manager.getWhiteList()
             for device in devices:
                 root_logger.info(f"Retrieving firmware version for device {device.mac_address}...")
 
@@ -203,11 +259,19 @@ def main():
                         continue
                     else:
                         device.connect()
-                        if not device.connected_event.wait(timeout=60):
+                        if not device.connected_event.wait(timeout=10):
                             root_logger.error(
                                 f"Failed to connect to device {device.mac_address} within timeout."
                             )
-                            continue
+                            device.disconnect()
+                if device.is_busy:
+                    """
+                    Does this wait contribute the unexpected MQTT disconnect??
+                    """
+                    while device.is_busy:
+                        print("Waiting for device to be free")
+                        time.sleep(1)
+                    device.disconnect()
 
                 # device.retrieve_firmware_version()
                 time.sleep(1)  # Prevent command flooding
@@ -220,7 +284,7 @@ def main():
     except KeyboardInterrupt:
         device_manager.stop_discovery()
         device_manager.disconnect_all_devices()
-        time.sleep(3)
+        time.sleep(10)
         root_logger.info("\nShutting down DeviceManager...")
         device_manager.stop()
         manager_thread.join()
